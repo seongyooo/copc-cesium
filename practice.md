@@ -139,7 +139,79 @@ points.add({ position, pixelSize: 3, color: Cesium.Color.RED });
 
 ## 2. copc.js 실습
 
-> 추후 작성 예정
+### 2-1. 환경 세팅
+
+```bash
+npm init -y
+npm install copc
+```
+
+실습 파일은 `.mjs` 확장자 사용 (ES Module 방식)
+
+```bash
+node copc-test.mjs
+```
+
+---
+
+### 2-2. 기본 API 흐름
+
+```javascript
+import { Copc } from 'copc';
+
+const URL = 'https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz';
+
+// Step 1: 헤더 + info VLR 읽기 (처음 589바이트만 Range Request)
+const copc = await Copc.create(URL);
+
+// Step 2: 계층 페이지 로드 — 노드 키 맵 획득
+const { nodes } = await Copc.loadHierarchyPage(URL, copc.info.rootHierarchyPage);
+
+// Step 3: 특정 노드의 점 데이터 로드
+const view = await Copc.loadPointDataView(URL, copc, nodes['0-0-0-0']);
+
+// Step 4: 점 데이터 읽기
+const getX = view.getter('X');
+const getY = view.getter('Y');
+const getZ = view.getter('Z');
+for (let i = 0; i < view.pointCount; i++) {
+  const x = getX(i), y = getY(i), z = getZ(i);
+}
+```
+
+---
+
+### 2-3. 실습 결과 (Autzen Stadium 샘플)
+
+**샘플 파일:** `https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz`
+
+**헤더:**
+```
+포인트 수: 10,653,336 (약 1천만 개)
+스케일: [0.01, 0.01, 0.01]  → 좌표 정밀도 1cm
+오프셋: [637290.75, 851209.9, 510.7]
+좌표계: NAD83 / Oregon GIC Lambert (ft) → 미국 오레곤 주, 피트 단위
+```
+
+**계층:**
+```
+총 노드 수: 278개
+루트 노드(0-0-0-0): pointCount=61,201 / offset=79,462,688 / length=763,258
+→ 전체 1천만 개 중 루트는 61,201개 (약 0.6%) — LoD 효과
+→ 파일 79MB 지점에서 763KB만 Range Request
+```
+
+**점 데이터 (처음 5개):**
+```
+점 0: X=638865.15, Y=849280.01, Z=425.16 / R=44544, G=44032, B=37632 / Classification=2(Ground)
+점 1: X=638852.82, Y=849328.60, Z=424.54 / R=22016, G=28416, B=27648 / Classification=2(Ground)
+...
+```
+
+**확인된 사항:**
+- `view.getter('X')(i)` → Scale/Offset 자동 적용된 실제 미터 좌표 반환 ✅
+- R/G/B 범위: 0~65535 (uint16) ✅
+- Classification=2 → Ground 포인트 ✅
 
 ---
 

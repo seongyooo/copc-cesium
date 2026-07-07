@@ -1,0 +1,24 @@
+{
+  "name": "copc",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seongyooo/copc-cesium.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/seongyooo/copc-cesium/issues"
+  },
+  "homepage": "https://github.com/seongyooo/copc-cesium#readme",
+  "dependencies": {
+    "copc": "^0.0.8"
+  }
+}
