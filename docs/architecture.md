@@ -16,7 +16,7 @@
 8. [중심 우선 로딩 정렬](#8-중심-우선-로딩-정렬)
 9. [LRU 캐시 및 eviction](#9-lru-캐시-및-eviction)
 10. [Web Worker 풀 (WorkerPool)](#10-web-worker-풀-workerpool)
-11. [rAF 청크 로딩 (loader.js)](#11-raf-청크-로딩-loaderjs)
+11. [PointCloudPrimitive (DrawCommand 기반 렌더링)](#11-pointcloudprimitive-drawcommand-기반-렌더링)
 12. [SSE Threshold 기본값 설계](#12-sse-threshold-기본값-설계)
 13. [내부 상태 변수 전체 목록](#13-내부-상태-변수-전체-목록)
 14. [옵션 레퍼런스](#14-옵션-레퍼런스)
@@ -106,11 +106,28 @@ camera.changed 이벤트
   │
   └─ [debounceMs 후] _updateLoD() ← 느린 경로
                      BFS 재계산 + 네트워크 요청
+
+camera.moveEnd 이벤트 (동일 handler)
+  │
+  └─ Ctrl+드래그 등 방향만 변경되는 경우 감지 (위치 변화 없어 changed 미발동)
+      → _updateVisibility() + debounce → _updateLoD()
 ```
 
 ### 빠른 경로가 필요한 이유
 
 카메라가 패닝/회전할 때마다 BFS + 네트워크 요청을 실행하면 과부하가 발생합니다. 빠른 경로는 이미 로드된 노드들만 보이는지 여부를 빠르게 갱신합니다.
+
+### `camera.moveEnd` 추가 이유
+
+`camera.changed`는 카메라 **위치** 변화량 기반으로 발동합니다. Ctrl+드래그로 방향(direction)만 바꾸는 경우 위치가 고정되므로 `changed`가 발동되지 않아 LoD 갱신이 누락됩니다. `camera.moveEnd`를 동일 handler로 함께 구독해 이 문제를 해결합니다.
+
+```js
+// _startListening() 내부
+this._removeCameraListener  = this._viewer.camera.changed.addEventListener(handler);
+this._removeMoveEndListener = this._viewer.camera.moveEnd.addEventListener(handler);
+```
+
+`destroy()`에서 두 리스너를 모두 해제합니다.
 
 ### `_lastTargetSet`이 중요한 이유
 
@@ -145,9 +162,22 @@ this._container = new Cesium.PrimitiveCollection({ destroyPrimitives: false });
 viewer.scene.primitives.add(this._container);
 ```
 
-씬에는 이 컨테이너 하나만 추가하고, 모든 point cloud 컬렉션은 `this._container`를 통해 add/remove합니다. `destroyPrimitives: false`이므로 remove해도 객체가 살아있어 캐시에서 꺼내 재추가할 수 있습니다.
+씬에는 이 컨테이너 하나만 추가하고, 모든 point cloud primitive는 `this._container`를 통해 add/remove합니다. `destroyPrimitives: false`이므로 remove해도 객체가 살아있어 캐시에서 꺼내 재추가할 수 있습니다.
 
 실제 WebGL 해제는 `_evict`에서 명시적으로 `collection.destroy()`를 호출합니다.
+
+### destroy() 이중 파괴 버그
+
+`scene.primitives.destroyPrimitives`가 기본 `true`이므로, `scene.primitives.remove(this._container)`를 호출하면 Cesium이 `this._container.destroy()`를 **자동으로** 실행합니다. 그 다음 줄에서 `this._container.destroy()`를 명시적으로 한 번 더 호출하면 `DeveloperError`가 발생합니다.
+
+```js
+// 수정 전 (이중 파괴 버그)
+this._viewer.scene.primitives.remove(this._container);
+this._container.destroy();  // ← 이미 자동 destroy됨, 두 번째 호출 → 오류
+
+// 수정 후
+this._viewer.scene.primitives.remove(this._container);  // auto-destroy로 충분
+```
 
 ### show=false 대신 remove/add
 
@@ -338,7 +368,7 @@ fetch + LAZ 파싱          proj4 변환 (EPSG → WGS84)
   (Copc.loadPointDataView)  Cartesian3 계산
 raw 배열 → Transferable →  → positions/colors 배열
 ← Transferable 결과 ←
-PointPrimitiveCollection 생성 (WebGL 필요)
+PointCloudPrimitive 생성 (WebGL 필요)
 ```
 
 ### WorkerPool 주요 로직
@@ -353,26 +383,112 @@ PointPrimitiveCollection 생성 (WebGL 필요)
 
 ---
 
-## 11. rAF 청크 로딩 (loader.js)
+## 11. PointCloudPrimitive (DrawCommand 기반 렌더링)
 
-### 문제
+### 배경: PointPrimitiveCollection의 한계
 
-`PointPrimitiveCollection.add()`를 수만 번 동기 호출하면 메인 스레드가 수백ms 블로킹됩니다.
+이전 구현은 `PointPrimitiveCollection.add()`로 점마다 JS 객체를 생성했습니다.
 
-### 해결: requestAnimationFrame 청크
+```
+점당 메모리: ~400B (JS 객체 오버헤드)
+10만 점 노드: ~40MB
+→ 노드 10개 = 400MB → OOM 위험
+```
+
+또한 `requestAnimationFrame`으로 청크 단위 추가를 해야 했고, 로딩 중 부분 표시로 인해 씬이 불안정했습니다.
+
+### 문제: Cesium.Primitive pipeline의 batchId 자동 주입
+
+`Cesium.Primitive`를 사용하면 내부 geometry pipeline이 **batchId 관련 셰이더 코드를 무조건 주입**합니다. 커스텀 셰이더에 `a_batchId` 어트리뷰트가 없으면 `WebGL: INVALID_OPERATION` 오류가 발생합니다. 이 pipeline을 우회하기 위해 `DrawCommand`를 직접 사용합니다.
+
+### 해결: DrawCommand 직접 사용
 
 ```js
-const CHUNK = 3000;
-for (let start = 0; start < pointCount; start += CHUNK) {
-  // CHUNK개 포인트 추가
-  if (end < pointCount)
-    await new Promise(r => requestAnimationFrame(r));  // 렌더 프레임 양보
+class PointCloudPrimitive {
+  constructor(posHigh, posLow, colU8, pointCount, boundingSphere, pixelSize) { ... }
+
+  update(frameState) {
+    if (!this.show || this._destroyed) return;
+    if (!this._cmd) this._initGpu(frameState.context);
+    frameState.commandList.push(this._cmd);
+  }
+
+  _initGpu(context) {
+    // Cesium.Buffer.createVertexBuffer × 3 (posHigh, posLow, colU8)
+    // Cesium.VertexArray with attributeLocations
+    // Cesium.ShaderProgram.fromCache (GLSL ES 3.00)
+    // Cesium.DrawCommand with PrimitiveType.POINTS
+    // CPU 배열 null 해제 (GC 허용)
+  }
+
+  destroy() {
+    this._va.destroy();
+    this._sp.destroy();
+    Cesium.destroyObject(this);
+  }
 }
 ```
 
-3000개씩 추가한 뒤 다음 rAF까지 제어를 돌려줍니다. 로딩 중에도 Cesium이 정상적으로 렌더링됩니다.
+`PrimitiveCollection`과의 duck typing을 위해 `update(frameState)`, `destroy()`, `isDestroyed()`, `show` 프로퍼티를 구현합니다.
 
-scratch 객체(`scratchPos`, `scratchColor`) 재사용으로 GC 압박도 최소화합니다.
+### Float64 → Float32 RTE (Relative-to-Eye) 분리
+
+ECEF 좌표는 절댓값이 수백만 미터 단위이므로 Float32로 그대로 저장하면 정밀도 손실로 점이 수십~수백 미터 떨립니다. `Math.fround`를 이용해 high/low 두 개의 Float32로 분리합니다.
+
+```js
+// Worker 결과 Float64 ECEF → 메인 스레드에서 Float32 high/low 분리
+for (let i = 0; i < pointCount; i++) {
+  const x = ecef[i * 3];
+  const high = Math.fround(x);
+  posHigh[i * 3]     = high;
+  posLow[i * 3]      = x - high;  // 나머지 정밀도
+  // y, z 동일 처리
+}
+```
+
+셰이더에서 `czm_translateRelativeToEye`로 카메라 기준 상대 좌표로 변환 후, `czm_modelViewProjectionRelativeToEye`로 투영합니다. 카메라 좌표 근방에서는 Float32 정밀도로 충분합니다.
+
+### GLSL ES 3.00 셰이더
+
+```glsl
+// Vertex Shader
+#version 300 es
+in vec3 a_positionHigh;
+in vec3 a_positionLow;
+in vec3 a_color;
+out vec3 v_color;
+
+void main() {
+  vec4 pos = czm_translateRelativeToEye(a_positionHigh, a_positionLow);
+  gl_Position = czm_modelViewProjectionRelativeToEye * pos;
+  gl_PointSize = u_pixelSize;
+  v_color = a_color;
+}
+
+// Fragment Shader
+#version 300 es
+precision mediump float;
+in vec3 v_color;
+out vec4 fragColor;
+
+void main() {
+  fragColor = vec4(v_color, 1.0);
+}
+```
+
+`in`/`out` 키워드와 `out vec4 fragColor`는 GLSL ES 3.00 문법입니다 (ES 2.00의 `attribute`/`varying`/`gl_FragColor` 대신).
+
+### 메모리 비교
+
+| 방식 | 10만 점 메모리 | 비고 |
+|---|---|---|
+| PointPrimitiveCollection | ~40MB | JS 객체 400B/점 |
+| PointCloudPrimitive (DrawCommand) | ~2.8MB | Float32 × 7 × 4B = 2.8MB |
+| 개선 | **14배 감소** | CPU 배열은 GPU 업로드 후 null 해제 |
+
+### GPU 리소스 지연 생성
+
+생성자에서는 CPU 배열만 보관하고, `update()`가 처음 호출될 때 (즉 Cesium 렌더 루프가 시작된 후) `_initGpu(frameState.context)`를 실행합니다. WebGL 컨텍스트가 확실히 준비된 시점에 GPU 버퍼를 할당하고, 이후 CPU 배열을 `null`로 해제해 GC에 맡깁니다.
 
 ---
 
@@ -420,7 +536,8 @@ SSE_root = (radius / (4 × radius)) × (screenHeight / (2 × tan(fovY/2)))
 | `_pendingUpdate` | `boolean` | 로딩 중 카메라 이동 → 완료 후 재실행 예약 |
 | `_debounceTimer` | `number` | debounce setTimeout ID |
 | `_loadGen` | `number` | 로드 세대 번호 (줌아웃 시 증가) |
-| `_removeCameraListener` | `function` | 카메라 이벤트 해제 함수 |
+| `_removeCameraListener` | `function` | `camera.changed` 이벤트 해제 함수 |
+| `_removeMoveEndListener` | `function` | `camera.moveEnd` 이벤트 해제 함수 |
 | `_url` | `string` | COPC 파일 URL |
 | `_copc` | `object` | `Copc.create()` 반환값 |
 | `_nodes` | `object` | 전체 Octree 노드 맵 |
@@ -439,7 +556,7 @@ SSE_root = (radius / (4 × radius)) × (screenHeight / (2 × tan(fovY/2)))
 | `geoidOffset` | `0` | 지오이드 보정값 (m) |
 | `concurrency` | `5` | 동시 노드 로드 수 / Worker 풀 크기 |
 | `debounceMs` | `300` | 카메라 정지 후 LoD 갱신 대기 시간 (ms) |
-| `maxCacheNodes` | `80` | LRU 캐시 최대 노드 수 |
+| `maxCacheNodes` | `40` | LRU 캐시 최대 노드 수 |
 | `maxVisibleNodes` | `100` | BFS 최대 후보 노드 수 (OOM 방지 상한) |
 | `pixelSize` | `2` | 점 크기 (px) |
 | `sseThreshold` | `250` | BFS 확장 임계값 (px). 낮을수록 세밀, 높을수록 성능 우선 |
@@ -451,7 +568,7 @@ SSE_root = (radius / (4 × radius)) × (screenHeight / (2 × tan(fovY/2)))
 {
   sseThreshold:    400,   // 덜 세밀하게
   maxVisibleNodes: 50,    // BFS 후보 제한
-  maxCacheNodes:   40,    // GPU 메모리 절약
+  maxCacheNodes:   20,    // GPU 메모리 절약
   concurrency:     3,     // 동시 로드 감소
 }
 
@@ -459,7 +576,7 @@ SSE_root = (radius / (4 × radius)) × (screenHeight / (2 × tan(fovY/2)))
 {
   sseThreshold:    100,   // 더 세밀하게
   maxVisibleNodes: 150,
-  maxCacheNodes:   120,
+  maxCacheNodes:   80,
   concurrency:     8,
 }
 ```
