@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>LAS/LAZ 1.4 &amp; COPC 파일 구조</title>
+<style>
+  :root{
+    --bg:#0f1419;
+    --card:#161c26;
+    --line:#2a3444;
+    --text:#e6edf3;
+    --sub:#9aa7b8;
+    --accent:#5eb3ff;
+    --accent2:#ffb86b;
+    --accent3:#7ee787;
+    --accent4:#ff7eb6;
+    --accent5:#c792ea;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Pretendard,sans-serif;
+    background:var(--bg);
+    color:var(--text);
+    line-height:1.55;
+    padding:32px 16px 80px;
+  }
+  h1{
+    text-align:center;
+    font-size:1.6rem;
+    margin:0 0 6px;
+  }
+  p.lead{
+    text-align:center;
+    color:var(--sub);
+    margin:0 0 36px;
+    font-size:0.92rem;
+  }
+  .container{max-width:980px;margin:0 auto;}
+  section{margin-bottom:44px;}
+  h2{
+    font-size:1.1rem;
+    display:flex;
+    align-items:center;
+    gap:10px;
+    margin-bottom:16px;
+  }
+  h2 .tag{
+    font-size:0.7rem;
+    background:var(--line);
+    color:var(--sub);
+    padding:3px 9px;
+    border-radius:20px;
+    font-weight:500;
+  }
+
+  /* Overall file map */
+  .filemap{
+    display:flex;
+    flex-direction:column;
+    gap:4px;
+    border-radius:12px;
+    overflow:hidden;
+    border:1px solid var(--line);
+  }
+  .fm-row{
+    display:flex;
+    align-items:center;
+    padding:14px 18px;
+    gap:14px;
+  }
+  .fm-row .dot{
+    width:10px;height:10px;border-radius:50%;flex:none;
+  }
+  .fm-row .label{font-weight:600;font-size:0.92rem;}
+  .fm-row .desc{color:var(--sub);font-size:0.82rem;}
+  .fm-header{background:#1a2740;}
+  .fm-header .dot{background:var(--accent);}
+  .fm-vlr{background:#20231a;}
+  .fm-vlr .dot{background:var(--accent2);}
+  .fm-point{background:#182a1e;}
+  .fm-point .dot{background:var(--accent3);}
+  .fm-evlr{background:#2a1826;}
+  .fm-evlr .dot{background:var(--accent4);}
+  .arrow{
+    text-align:center;
+    color:var(--sub);
+    font-size:0.75rem;
+    padding:2px 0;
+  }
+
+  /* card */
+  .card{
+    background:var(--card);
+    border:1px solid var(--line);
+    border-radius:12px;
+    padding:20px 22px;
+  }
+
+  table{
+    width:100%;
+    border-collapse:collapse;
+    font-size:0.84rem;
+  }
+  th,td{
+    text-align:left;
+    padding:8px 10px;
+    border-bottom:1px solid var(--line);
+  }
+  th{
+    color:var(--sub);
+    font-weight:600;
+    font-size:0.75rem;
+    text-transform:uppercase;
+    letter-spacing:0.03em;
+  }
+  td.field{font-weight:600;}
+  td.size{color:var(--accent);white-space:nowrap;}
+  td.off{color:var(--sub);white-space:nowrap;font-variant-numeric:tabular-nums;}
+  tr:last-child td{border-bottom:none;}
+  .badge{
+    display:inline-block;
+    font-size:0.68rem;
+    padding:2px 7px;
+    border-radius:6px;
+    margin-left:6px;
+    font-weight:600;
+  }
+  .b14{background:rgba(94,179,255,0.15);color:var(--accent);}
+
+  .grid2{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:18px;
+  }
+  @media (max-width:720px){ .grid2{grid-template-columns:1fr;} }
+
+  .mini-title{
+    font-size:0.9rem;
+    font-weight:700;
+    margin-bottom:10px;
+    color:var(--accent2);
+  }
+  .mini-title.green{color:var(--accent3);}
+  .mini-title.pink{color:var(--accent4);}
+  .mini-title.purple{color:var(--accent5);}
+
+  .byte-strip{
+    display:flex;
+    flex-wrap:wrap;
+    gap:4px;
+    margin:14px 0 4px;
+  }
+  .byte-chip{
+    font-size:0.68rem;
+    color:#0f1419;
+    background:var(--accent);
+    padding:4px 8px;
+    border-radius:6px;
+    font-weight:600;
+    white-space:nowrap;
+  }
+
+  .note{
+    font-size:0.8rem;
+    color:var(--sub);
+    margin-top:10px;
+    border-left:3px solid var(--line);
+    padding-left:10px;
+  }
+
+  .hierarchy-tree{
+    font-size:0.85rem;
+    line-height:2;
+  }
+  .hierarchy-tree .k{color:var(--accent2);font-weight:600;}
+  .hierarchy-tree .v{color:var(--sub);}
+  .indent1{margin-left:18px;}
+  .indent2{margin-left:36px;}
+
+  .legend{
+    display:flex;
+    gap:18px;
+    flex-wrap:wrap;
+    margin-top:18px;
+    font-size:0.78rem;
+    color:var(--sub);
+  }
+  .legend span{display:flex;align-items:center;gap:6px;}
+  .legend .sw{width:10px;height:10px;border-radius:3px;}
+</style>
+</head>
+<body>
+<div class="container">
+
+  <h1>LAS/LAZ 1.4 &amp; COPC 파일 구조</h1>
+  <p class="lead">헤더 → VLR → 포인트 데이터 → COPC 계층 구조까지 한눈에</p>
+
+  <section>
+    <h2>1. 전체 파일 레이아웃 <span class="tag">Top-level Map</span></h2>
+    <div class="filemap">
+      <div class="fm-row fm-header">
+        <div class="dot"></div>
+        <div class="label">Public Header Block</div>
+        <div class="desc">375 bytes (LAS 1.4 고정 길이)</div>
+      </div>
+      <div class="fm-row fm-vlr">
+        <div class="dot"></div>
+        <div class="label">Variable Length Records (VLR)</div>
+        <div class="desc">CRS 정의, LASzip 압축 정보, COPC Info VLR 등</div>
+      </div>
+      <div class="fm-row fm-point">
+        <div class="dot"></div>
+        <div class="label">Point Data Records</div>
+        <div class="desc">LAS: 순차 배열 · LAZ/COPC: 옥트리 노드별 압축 청크</div>
+      </div>
+      <div class="fm-row fm-evlr">
+        <div class="dot"></div>
+        <div class="label">Extended VLR (EVLR)</div>
+        <div class="desc">파일 끝에 위치 · COPC Hierarchy VLR이 여기 들어가는 경우가 많음</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>2. Public Header Block (375 bytes) <span class="tag">Byte-level</span></h2>
+    <div class="card">
+      <table>
+        <tr><th>Offset</th><th>Field</th><th>Size</th></tr>
+        <tr><td class="off">0</td><td class="field">File Signature</td><td class="size">4 B</td></tr>
+        <tr><td class="off">4</td><td class="field">File Source ID</td><td class="size">2 B</td></tr>
+        <tr><td class="off">6</td><td class="field">Global Encoding</td><td class="size">2 B</td></tr>
+        <tr><td class="off">8</td><td class="field">Project ID – GUID Data 1–4</td><td class="size">16 B</td></tr>
+        <tr><td class="off">24</td><td class="field">Version Major / Minor</td><td class="size">1+1 B</td></tr>
+        <tr><td class="off">26</td><td class="field">System Identifier</td><td class="size">32 B</td></tr>
+        <tr><td class="off">58</td><td class="field">Generating Software</td><td class="size">32 B</td></tr>
+        <tr><td class="off">90</td><td class="field">File Creation Day of Year / Year</td><td class="size">2+2 B</td></tr>
+        <tr><td class="off">94</td><td class="field">Header Size</td><td class="size">2 B</td></tr>
+        <tr><td class="off">96</td><td class="field">Offset to Point Data</td><td class="size">4 B</td></tr>
+        <tr><td class="off">100</td><td class="field">Number of VLRs</td><td class="size">4 B</td></tr>
+        <tr><td class="off">104</td><td class="field">Point Data Record Format</td><td class="size">1 B</td></tr>
+        <tr><td class="off">105</td><td class="field">Point Data Record Length</td><td class="size">2 B</td></tr>
+        <tr><td class="off">107</td><td class="field">Legacy Number of Point Records</td><td class="size">4 B</td></tr>
+        <tr><td class="off">111</td><td class="field">Legacy Number of Points by Return (×5)</td><td class="size">20 B</td></tr>
+        <tr><td class="off">131</td><td class="field">X/Y/Z Scale Factor (double×3)</td><td class="size">24 B</td></tr>
+        <tr><td class="off">155</td><td class="field">X/Y/Z Offset (double×3)</td><td class="size">24 B</td></tr>
+        <tr><td class="off">179</td><td class="field">Max/Min X, Y, Z (double×6)</td><td class="size">48 B</td></tr>
+        <tr><td class="off">227</td><td class="field">Start of Waveform Data Packet Record</td><td class="size">8 B</td></tr>
+        <tr><td class="off">235</td><td class="field">Start of First Extended VLR <span class="badge b14">1.4</span></td><td class="size">8 B</td></tr>
+        <tr><td class="off">243</td><td class="field">Number of Extended VLRs <span class="badge b14">1.4</span></td><td class="size">4 B</td></tr>
+        <tr><td class="off">247</td><td class="field">Number of Point Records (64-bit) <span class="badge b14">1.4</span></td><td class="size">8 B</td></tr>
+        <tr><td class="off">255</td><td class="field">Number of Points by Return ×15 <span class="badge b14">1.4</span></td><td class="size">120 B</td></tr>
+        <tr><td class="off">375</td><td class="field">— 헤더 끝 —</td><td class="size">총 375 B</td></tr>
+      </table>
+      <p class="note">주황 배지(1.4)가 붙은 필드는 LAS 1.3까지 없던, 1.4에서 신규 추가된 확장 필드입니다. 64비트 포인트 카운트 덕분에 대용량 포인트 클라우드(수십억 점)를 표현할 수 있습니다.</p>
+    </div>
+  </section>
+
+  <div class="grid2">
+    <section>
+      <h2>3. 일반 VLR 구조 <span class="tag">generic</span></h2>
+      <div class="card">
+        <div class="mini-title">VLR Header (54 bytes) + Data</div>
+        <table>
+          <tr><td class="field">Reserved</td><td class="size">2 B</td></tr>
+          <tr><td class="field">User ID</td><td class="size">16 B</td></tr>
+          <tr><td class="field">Record ID</td><td class="size">2 B</td></tr>
+          <tr><td class="field">Record Length After Header</td><td class="size">2 B</td></tr>
+          <tr><td class="field">Description</td><td class="size">32 B</td></tr>
+          <tr><td class="field">Data (가변)</td><td class="size">N B</td></tr>
+        </table>
+        <p class="note">EVLR도 동일 구조지만 Record Length 필드가 64비트(8B)로 확장되어 더 큰 데이터를 담을 수 있습니다.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>4. COPC 전용 VLR <span class="tag">copc</span></h2>
+      <div class="card">
+        <div class="mini-title pink">COPC Info VLR — user_id "copc", record_id 1</div>
+        <table>
+          <tr><td class="field">Center X / Y / Z</td><td class="size">24 B</td></tr>
+          <tr><td class="field">Root Node Halfsize</td><td class="size">8 B</td></tr>
+          <tr><td class="field">Root Node Point Spacing</td><td class="size">8 B</td></tr>
+          <tr><td class="field">GPS Time Min / Max</td><td class="size">16 B</td></tr>
+          <tr><td class="field">Root Hierarchy Offset / Size</td><td class="size">16 B</td></tr>
+        </table>
+        <div class="mini-title purple" style="margin-top:16px;">COPC Hierarchy VLR — record_id 1000</div>
+        <p class="note" style="margin-top:0;">옥트리 각 노드의 위치·오프셋·포인트 수를 담은 Entry 배열. 아래 5번 항목에서 상세히 설명합니다.</p>
+      </div>
+    </section>
+  </div>
+
+  <section>
+    <h2>5. COPC Hierarchy Entry &amp; 옥트리 개념도 <span class="tag">core idea</span></h2>
+    <div class="card">
+      <div class="mini-title green">Hierarchy Entry 구조 (32 bytes / entry)</div>
+      <table>
+        <tr><td class="field">Key: Level, X, Y, Z</td><td class="size">4×4 B = 16 B</td></tr>
+        <tr><td class="field">Offset (파일 내 청크 위치)</td><td class="size">8 B</td></tr>
+        <tr><td class="field">Byte Size (청크 압축 크기)</td><td class="size">4 B</td></tr>
+        <tr><td class="field">Point Count</td><td class="size">4 B</td></tr>
+      </table>
+      <p class="note">Point Count가 음수이면 "이 항목은 실제 포인트가 아니라 하위 Hierarchy 페이지를 가리키는 포인터"라는 의미입니다. 이렇게 트리를 재귀적으로 따라가며 필요한 해상도까지만 읽을 수 있습니다.</p>
+
+      <div class="hierarchy-tree" style="margin-top:20px;">
+        <div><span class="k">Root (Level 0)</span> <span class="v">— 전체 영역, 가장 낮은 해상도</span></div>
+        <div class="indent1"><span class="k">├─ Level 1</span> <span class="v">— 8개 하위 옥트리 노드 (x2 해상도)</span></div>
+        <div class="indent2"><span class="k">├─ Level 2</span> <span class="v">— 필요한 영역만 세분화</span></div>
+        <div class="indent2"><span class="k">└─ Level N</span> <span class="v">— 요청한 해상도/영역에 도달하면 중단</span></div>
+      </div>
+      <p class="note">클라이언트는 헤더 + Hierarchy VLR만 먼저 내려받아 트리를 파악한 뒤, 필요한 노드의 (Offset, Byte Size)만 골라 HTTP Range Request로 그 부분만 스트리밍합니다. 이것이 COPC가 "Cloud Optimized"인 이유입니다.</p>
+
+      <div class="legend">
+        <span><span class="sw" style="background:var(--accent);"></span>Header</span>
+        <span><span class="sw" style="background:var(--accent2);"></span>VLR</span>
+        <span><span class="sw" style="background:var(--accent3);"></span>Point Data (청크)</span>
+        <span><span class="sw" style="background:var(--accent4);"></span>EVLR / Hierarchy</span>
+      </div>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>

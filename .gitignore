@@ -220,3 +220,6 @@ $RECYCLE.BIN/
 *.lnk
 
 # End of https://www.toptal.com/developers/gitignore/api/node,windows,macos,visualstudiocode
+
+# 로컬 테스트 파일 (Cesium 토큰 포함)
+cesium-test.html
