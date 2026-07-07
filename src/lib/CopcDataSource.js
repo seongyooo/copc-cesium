@@ -424,6 +424,11 @@ export class CopcDataSource {
       this._debounceTimer = setTimeout(() => this._updateLoD(), this._opts.debounceMs);
     };
     this._removeCameraListener = this._viewer.camera.changed.addEventListener(handler);
+
+    // camera.changed 는 위치 변화량 기반이므로 Ctrl+드래그(방향만 변경)에서는
+    // 발동하지 않는다. moveEnd 는 모든 카메라 움직임 종료 시 발동하므로
+    // 방향 전환 후 LoD 갱신을 보장한다.
+    this._removeMoveEndListener = this._viewer.camera.moveEnd.addEventListener(handler);
   }
 
   _emit(info) {
@@ -451,7 +456,8 @@ export class CopcDataSource {
   /** 모든 리소스를 해제하고 Viewer에서 제거합니다. */
   destroy() {
     clearTimeout(this._debounceTimer);
-    if (this._removeCameraListener) this._removeCameraListener();
+    if (this._removeCameraListener)  this._removeCameraListener();
+    if (this._removeMoveEndListener) this._removeMoveEndListener();
     this._pool.destroy();
     for (const data of this._cache.values()) {
       data.collection.destroy();
