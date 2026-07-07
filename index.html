@@ -18,6 +18,16 @@
 <body>
   <div id="cesiumContainer"></div>
   <div id="status">초기화 중...</div>
+  <!-- fetch 패치: cache: 'no-store' 강제 (ERR_CACHE_OPERATION_NOT_SUPPORTED 우회)
+       클래식 스크립트는 모듈보다 먼저 실행되므로 copc.js가 import되기 전에 적용됨 -->
+  <script>
+    (function () {
+      var _fetch = window.fetch.bind(window);
+      window.fetch = function (input, init) {
+        return _fetch(input, Object.assign({}, init, { cache: 'no-store' }));
+      };
+    })();
+  </script>
   <script type="module" src="/src/main.js"></script>
 </body>
 </html>
