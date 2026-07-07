@@ -130,10 +130,10 @@ export async function loadNode(url, copc, nodeInfo, pool, srcProj, projDef, geoi
   // czm_modelViewProjectionRelativeToEye: eye-space → clip-space 행렬.
   //
   const vs = `
-attribute vec3 position3DHigh;
-attribute vec3 position3DLow;
-attribute vec4 color;
-varying vec4 v_color;
+in vec3 position3DHigh;
+in vec3 position3DLow;
+in vec4 color;
+out vec4 v_color;
 void main() {
   v_color = color;
   gl_PointSize = ${pixelSize.toFixed(1)};
@@ -142,7 +142,7 @@ void main() {
 }`;
 
   const fs = `
-varying vec4 v_color;
+in vec4 v_color;
 void main() {
   gl_FragColor = v_color;
 }`;
