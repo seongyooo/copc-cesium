@@ -46,8 +46,9 @@ const satelliteBtn  = document.getElementById('satelliteBtn');
 const presetBtns    = document.querySelectorAll('.preset-btn');
 
 // ── 현재 로드된 데이터소스 ─────────────────────────────────
-let currentDs   = null;
-let activePreset = null;   // 현재 활성화된 프리셋 key
+let currentDs        = null;
+let activePreset     = null;   // 현재 활성화된 프리셋 key
+let activePresetOpts = null;   // 활성 프리셋의 옵션 (불러오기 버튼에서 재사용)
 
 // ── 위성지도 토글 ──────────────────────────────────────────
 let satelliteOn = true;
@@ -60,8 +61,17 @@ satelliteBtn.addEventListener('click', () => {
 });
 
 // ── 데이터 로드 함수 ───────────────────────────────────────
+let _loadingController = null;  // 중복 로드 방지용
+
 async function loadCopc(url, opts = {}) {
   if (!url.trim()) return;
+
+  // 진행 중인 로드가 있으면 즉시 중단 표시 (새 로드 우선)
+  if (_loadingController) {
+    _loadingController.abort = true;
+  }
+  const ctrl = { abort: false };
+  _loadingController = ctrl;
 
   // 기존 데이터소스 정리
   if (currentDs) {
@@ -79,9 +89,15 @@ async function loadCopc(url, opts = {}) {
       geoidOffset:   opts.geoidOffset ?? 0,
       concurrency:   5,
       debounceMs:    300,
-      maxCacheNodes: 40,   // 80→40: PointPrimitive는 점마다 JS 객체 생성으로 메모리 과다 소모
+      maxCacheNodes: 40,
       pixelSize:     2,
     });
+
+    // 로드 완료 전에 다른 로드가 시작됐으면 이 결과 파기
+    if (ctrl.abort) {
+      ds.destroy();
+      return;
+    }
 
     currentDs = ds;
 
@@ -99,27 +115,37 @@ async function loadCopc(url, opts = {}) {
       }
     };
   } catch (err) {
-    statusEl.innerHTML = `❌ 오류: ${err.message}`;
-    console.error(err);
+    if (!ctrl.abort) {
+      statusEl.innerHTML = `❌ 오류: ${err.message}`;
+      console.error(err);
+    }
   } finally {
-    loadBtn.disabled = false;
+    if (!ctrl.abort) loadBtn.disabled = false;
+    if (_loadingController === ctrl) _loadingController = null;
   }
 }
 
 // ── URL 직접 입력 로드 ─────────────────────────────────────
 loadBtn.addEventListener('click', () => {
-  // 직접 입력 시 프리셋 활성화 해제
+  // 활성 프리셋이 있으면 해당 옵션 유지, 없으면 기본값
+  const opts = activePresetOpts ?? {};
   setActivePreset(null);
-  loadCopc(urlInput.value);
+  loadCopc(urlInput.value, opts);
 });
 
 urlInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') loadBtn.click();
 });
 
+// URL 을 직접 수정하면 프리셋 옵션 초기화
+urlInput.addEventListener('input', () => {
+  setActivePreset(null);
+});
+
 // ── 프리셋 버튼 ────────────────────────────────────────────
 function setActivePreset(key) {
-  activePreset = key;
+  activePreset     = key;
+  activePresetOpts = key ? PRESETS[key] : null;
   presetBtns.forEach(btn => {
     btn.classList.toggle('active', btn.dataset.preset === key);
   });
