@@ -15,11 +15,29 @@ export class WorkerPool {
     this._idle    = [];
     this._queue   = [];
 
-    for (let i = 0; i < size; i++) {
+    const createWorker = () => {
       const w = new Worker(workerUrl, { type: 'module' });
       w.onmessage = ({ data }) => this._onResult(data, w);
-      w.onerror   = (e) => console.error('[WorkerPool] Worker error:', e);
-      this._idle.push(w);
+      w.onerror = (e) => {
+        console.error('[WorkerPool] Worker error:', e);
+        // 이 Worker에 할당된 pending 작업 모두 reject
+        for (const [id, p] of this._pending) {
+          if (p.worker === w) {
+            this._pending.delete(id);
+            p.reject(new Error(`Worker crashed: ${e.message}`));
+          }
+        }
+        // idle 목록에서 제거 후 교체 Worker 생성
+        const idx = this._idle.indexOf(w);
+        if (idx !== -1) this._idle.splice(idx, 1);
+        this._idle.push(createWorker());
+        this._flush();
+      };
+      return w;
+    };
+
+    for (let i = 0; i < size; i++) {
+      this._idle.push(createWorker());
     }
   }
 

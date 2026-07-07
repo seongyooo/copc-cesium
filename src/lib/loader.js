@@ -50,22 +50,29 @@ export async function loadNode(url, copc, nodeInfo, pool, srcProj, projDef, geoi
   );
 
   // 메인 스레드: Cesium primitive 생성 (WebGL 컨텍스트 필요)
-  const collection = new Cesium.PointPrimitiveCollection();
-  for (let i = 0; i < pointCount; i++) {
-    collection.add({
-      position: new Cesium.Cartesian3(
-        positions[i * 3],
-        positions[i * 3 + 1],
-        positions[i * 3 + 2],
-      ),
-      pixelSize,
-      color: new Cesium.Color(
-        colors[i * 4],
-        colors[i * 4 + 1],
-        colors[i * 4 + 2],
-        colors[i * 4 + 3],
-      ),
-    });
+  // rAF 청크로 나눠 추가해 메인 스레드 블로킹 방지.
+  // scratch 객체 재사용으로 GC 압박 최소화 (collection.add 내부에서 값 복사).
+  const collection    = new Cesium.PointPrimitiveCollection();
+  const scratchPos    = new Cesium.Cartesian3();
+  const scratchColor  = new Cesium.Color();
+  const CHUNK         = 3000;
+
+  for (let start = 0; start < pointCount; start += CHUNK) {
+    const end = Math.min(start + CHUNK, pointCount);
+    for (let i = start; i < end; i++) {
+      scratchPos.x        = positions[i * 3];
+      scratchPos.y        = positions[i * 3 + 1];
+      scratchPos.z        = positions[i * 3 + 2];
+      scratchColor.red    = colors[i * 4];
+      scratchColor.green  = colors[i * 4 + 1];
+      scratchColor.blue   = colors[i * 4 + 2];
+      scratchColor.alpha  = 1.0;
+      collection.add({ position: scratchPos, pixelSize, color: scratchColor });
+    }
+    // 마지막 청크가 아니면 다음 프레임으로 양보
+    if (end < pointCount) {
+      await new Promise(r => requestAnimationFrame(r));
+    }
   }
 
   return { collection, pointCount, lastUsed: Date.now() };

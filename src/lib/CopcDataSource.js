@@ -2,7 +2,7 @@ import * as Cesium from 'cesium';
 import { Copc } from 'copc';
 import proj4 from 'proj4';
 import {
-  heightToDepth, getDepth,
+  distanceToDepth, getDepth,
   getNodeBoundingSphere, getCullingVolume, isInFrustum,
 } from './lod.js';
 import { loadNode } from './loader.js';
@@ -138,90 +138,109 @@ export class CopcDataSource {
     if (this._isUpdating) { this._pendingUpdate = true; return; }
     this._isUpdating = true;
 
-    const camera = this._viewer.camera;
-    const height = camera.positionCartographic.height;
-    const targetDepth = heightToDepth(height, this._maxDepth);
+    try {
+      const camera = this._viewer.camera;
+      const height = camera.positionCartographic.height;
+      let targetDepth = distanceToDepth(this._viewer.scene, camera, this._maxDepth);
 
-    // 1. 후보 노드 선택 (fallback: 해당 깊이 없으면 더 얕은 깊이)
-    let candidates = this._candidatesAt(targetDepth);
-    if (candidates.length === 0) {
-      for (let d = targetDepth - 1; d >= 0; d--) {
-        candidates = this._candidatesAt(d);
-        if (candidates.length > 0) break;
+      // 1. 후보 노드 선택 (fallback: 해당 깊이 없으면 더 얕은 깊이)
+      let candidates = this._candidatesAt(targetDepth);
+      if (candidates.length === 0) {
+        for (let d = targetDepth - 1; d >= 0; d--) {
+          candidates = this._candidatesAt(d);
+          if (candidates.length > 0) { targetDepth = d; break; }
+        }
       }
-    }
 
-    // 2. 프러스텀 컬링
-    const cv = getCullingVolume(camera);
-    const visibleKeys = candidates.filter(k => isInFrustum(this._sphere(k), cv));
-    const targetSet   = new Set(visibleKeys);
-    const culled      = candidates.length - visibleKeys.length;
+      // 2. 프러스텀 컬링
+      const cv = getCullingVolume(camera);
+      let visibleKeys = candidates.filter(k => isInFrustum(this._sphere(k), cv));
 
-    // 3. 캐시 히트 → 즉시 표시
-    const toLoad = [];
-    for (const key of visibleKeys) {
-      if (this._cache.has(key)) {
-        const d = this._cache.get(key);
-        d.collection.show = true;
-        d.lastUsed = Date.now();
-      } else {
-        toLoad.push(key);
+      // 2-1. 해당 깊이 노드가 모두 프러스텀 밖이면 더 얕은 깊이로 fallback
+      //      (depth 5 노드가 sparse해서 현재 시점에 없을 때 빈 화면 방지)
+      if (visibleKeys.length === 0 && targetDepth > 0) {
+        for (let d = targetDepth - 1; d >= 0; d--) {
+          const fc = this._candidatesAt(d);
+          visibleKeys = fc.filter(k => isInFrustum(this._sphere(k), cv));
+          if (visibleKeys.length > 0) { targetDepth = d; candidates = fc; break; }
+        }
       }
-    }
 
-    // 4. 화면 중앙에 가까운 노드부터 로드
-    const camPos = camera.position;
-    const camDir = camera.direction;
-    toLoad.sort((a, b) => {
-      const vA = Cesium.Cartesian3.normalize(
-        Cesium.Cartesian3.subtract(this._sphere(a).center, camPos, new Cesium.Cartesian3()),
-        new Cesium.Cartesian3());
-      const vB = Cesium.Cartesian3.normalize(
-        Cesium.Cartesian3.subtract(this._sphere(b).center, camPos, new Cesium.Cartesian3()),
-        new Cesium.Cartesian3());
-      return Cesium.Cartesian3.dot(vB, camDir) - Cesium.Cartesian3.dot(vA, camDir);
-    });
+      const targetSet = new Set(visibleKeys);
+      const culled    = candidates.length - visibleKeys.length;
 
-    this._emit({ depth: targetDepth, visible: visibleKeys.length, culled,
-      loading: toLoad.length, cached: this._cache.size, height });
+      // 3. 캐시 히트 → 즉시 표시
+      const toLoad = [];
+      for (const key of visibleKeys) {
+        if (this._cache.has(key)) {
+          const d = this._cache.get(key);
+          d.collection.show = true;
+          d.lastUsed = Date.now();
+        } else {
+          toLoad.push(key);
+        }
+      }
 
-    // 5. 캐시 미스 로드
-    let loadedCount = 0;
-    await this._runConcurrent(toLoad.map(key => async () => {
-      const data = await loadNode(
-        this._url, this._copc, this._nodes[key], this._pool,
-        this._opts.proj, this._opts.projDef,
-        this._opts.geoidOffset, this._opts.pixelSize,
-      );
-      this._viewer.scene.primitives.add(data.collection);
-      this._cache.set(key, data);
-      loadedCount++;
+      // 4. 화면 중앙에 가까운 노드부터 로드
+      const camPos = camera.position;
+      const camDir = camera.direction;
+      toLoad.sort((a, b) => {
+        const vA = Cesium.Cartesian3.normalize(
+          Cesium.Cartesian3.subtract(this._sphere(a).center, camPos, new Cesium.Cartesian3()),
+          new Cesium.Cartesian3());
+        const vB = Cesium.Cartesian3.normalize(
+          Cesium.Cartesian3.subtract(this._sphere(b).center, camPos, new Cesium.Cartesian3()),
+          new Cesium.Cartesian3());
+        return Cesium.Cartesian3.dot(vB, camDir) - Cesium.Cartesian3.dot(vA, camDir);
+      });
+
       this._emit({ depth: targetDepth, visible: visibleKeys.length, culled,
-        loading: toLoad.length - loadedCount, cached: this._cache.size, height });
-    }));
+        loading: toLoad.length, cached: this._cache.size, height });
 
-    // 6. 로딩 완료 후 비대상 노드 숨기기
-    for (const [key, data] of this._cache) {
-      if (!targetSet.has(key)) data.collection.show = false;
-    }
+      // 5. 캐시 미스 로드
+      let loadedCount = 0;
+      await this._runConcurrent(toLoad.map(key => async () => {
+        const data = await loadNode(
+          this._url, this._copc, this._nodes[key], this._pool,
+          this._opts.proj, this._opts.projDef,
+          this._opts.geoidOffset, this._opts.pixelSize,
+        );
+        this._viewer.scene.primitives.add(data.collection);
+        this._cache.set(key, data);
+        loadedCount++;
+        this._emit({ depth: targetDepth, visible: visibleKeys.length, culled,
+          loading: toLoad.length - loadedCount, cached: this._cache.size, height });
+      }));
 
-    // 7. LRU eviction
-    this._evict(targetSet);
+      // 6. 로딩 완료 후 비대상 노드 숨기기
+      for (const [key, data] of this._cache) {
+        if (!targetSet.has(key)) data.collection.show = false;
+      }
 
-    // 8. 최종 프러스텀 동기화
-    this._updateVisibility();
+      // 7. LRU eviction
+      this._evict(targetSet);
 
-    const visiblePoints = visibleKeys
-      .filter(k => this._cache.has(k))
-      .reduce((s, k) => s + this._cache.get(k).pointCount, 0);
+      // 8. targetSet 노드에 대해서만 최신 프러스텀으로 최종 동기화
+      //    (전체 캐시 순회 시 비대상 노드가 frustum 기준으로 re-show되는 것 방지)
+      const cv2 = getCullingVolume(camera);
+      for (const key of targetSet) {
+        const data = this._cache.get(key);
+        if (data) data.collection.show = isInFrustum(this._sphere(key), cv2);
+      }
 
-    this._emit({ depth: targetDepth, visible: visibleKeys.length, culled,
-      loading: 0, points: visiblePoints, cached: this._cache.size, height });
+      const visiblePoints = [...targetSet]
+        .filter(k => this._cache.has(k))
+        .reduce((s, k) => s + this._cache.get(k).pointCount, 0);
 
-    this._isUpdating = false;
-    if (this._pendingUpdate) {
-      this._pendingUpdate = false;
-      this._updateLoD();
+      this._emit({ depth: targetDepth, visible: visibleKeys.length, culled,
+        loading: 0, points: visiblePoints, cached: this._cache.size, height });
+
+    } finally {
+      this._isUpdating = false;
+      if (this._pendingUpdate) {
+        this._pendingUpdate = false;
+        this._updateLoD();
+      }
     }
   }
 
