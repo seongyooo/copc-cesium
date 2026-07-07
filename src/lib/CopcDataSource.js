@@ -2,7 +2,7 @@ import * as Cesium from 'cesium';
 import { Copc } from 'copc';
 import proj4 from 'proj4';
 import {
-  distanceToDepth, getDepth,
+  getDepth, getChildKeys, screenSpaceError,
   getNodeBoundingSphere, getCullingVolume, isInFrustum,
 } from './lod.js';
 import { loadNode } from './loader.js';
@@ -34,6 +34,8 @@ export class CopcDataSource {
    * @param {number}  options.debounceMs    카메라 정지 후 LoD 갱신 대기 ms (기본: 300)
    * @param {number}  options.maxCacheNodes LRU 캐시 최대 노드 수 (기본: 80)
    * @param {number}  options.pixelSize     점 크기 px (기본: 2)
+   * @param {number}  options.sseThreshold  BFS LoD 확장 임계값 px (기본: 20).
+   *                                        낮을수록 더 세밀 (깊은 깊이), 높을수록 성능 우선.
    */
   constructor(viewer, options = {}) {
     this._viewer   = viewer;
@@ -45,6 +47,7 @@ export class CopcDataSource {
       debounceMs:    300,
       maxCacheNodes: 80,
       pixelSize:     2,
+      sseThreshold:  20,
       ...options,
     };
 
@@ -132,6 +135,70 @@ export class CopcDataSource {
     }
   }
 
+  // ── BFS LoD 선택 ────────────────────────────────────────────
+
+  /**
+   * Potree 방식 BFS + SSE 기반 렌더링 노드 선택.
+   *
+   * 루트(0-0-0-0)부터 너비 우선 탐색하며 각 노드의 Screen Space Error를 계산합니다.
+   *   SSE > sseThreshold AND 자식 존재  → 자식 노드로 확장 (더 세밀하게)
+   *   SSE ≤ sseThreshold OR 자식 없음  → 현재 노드를 리프로 선택 (렌더링 대상)
+   *
+   * 결과: 카메라에 가까운 곳은 깊은 깊이, 먼 곳은 얕은 깊이가 혼재함.
+   *
+   * @returns {{ visibleKeys: string[], culled: number, maxDepth: number }}
+   */
+  _selectNodesBFS() {
+    const camera    = this._viewer.camera;
+    const scene     = this._viewer.scene;
+    const cv        = getCullingVolume(camera);
+    const threshold = this._opts.sseThreshold;
+
+    const visibleKeys = [];
+    let   culled      = 0;
+    const queue       = ['0-0-0-0'];
+
+    while (queue.length > 0) {
+      const key = queue.shift();
+
+      // 계층에 없는 노드는 스킵
+      if (!this._nodes[key]) continue;
+
+      const sphere = this._sphere(key);
+
+      // 프러스텀 컬링: OUTSIDE이면 해당 노드와 그 자손 모두 스킵
+      if (!isInFrustum(sphere, cv)) { culled++; continue; }
+
+      // pointCount = 0인 노드는 직접 렌더링하지 않지만 자식은 탐색
+      if (this._nodes[key].pointCount === 0) {
+        getChildKeys(key)
+          .filter(k => this._nodes[k])
+          .forEach(k => queue.push(k));
+        continue;
+      }
+
+      // SSE 계산
+      const sse = screenSpaceError(sphere, camera, scene);
+
+      // 존재하는 자식 노드 목록 (pointCount 무관 — 탐색은 계속해야 함)
+      const children = getChildKeys(key).filter(k => this._nodes[k]);
+
+      if (sse > threshold && children.length > 0) {
+        // 아직 화면에서 너무 크게 보임 → 자식으로 세분화
+        children.forEach(k => queue.push(k));
+      } else {
+        // 충분히 세밀하거나 더 이상 자식 없음 → 이 노드를 렌더링
+        visibleKeys.push(key);
+      }
+    }
+
+    const maxDepth = visibleKeys.length > 0
+      ? Math.max(...visibleKeys.map(getDepth))
+      : 0;
+
+    return { visibleKeys, culled, maxDepth };
+  }
+
   // ── 느린 경로: LoD 계산 + 새 노드 로드 ─────────────────────
 
   async _updateLoD() {
@@ -141,35 +208,12 @@ export class CopcDataSource {
     try {
       const camera = this._viewer.camera;
       const height = camera.positionCartographic.height;
-      let targetDepth = distanceToDepth(this._viewer.scene, camera, this._maxDepth);
 
-      // 1. 후보 노드 선택 (fallback: 해당 깊이 없으면 더 얕은 깊이)
-      let candidates = this._candidatesAt(targetDepth);
-      if (candidates.length === 0) {
-        for (let d = targetDepth - 1; d >= 0; d--) {
-          candidates = this._candidatesAt(d);
-          if (candidates.length > 0) { targetDepth = d; break; }
-        }
-      }
-
-      // 2. 프러스텀 컬링
-      const cv = getCullingVolume(camera);
-      let visibleKeys = candidates.filter(k => isInFrustum(this._sphere(k), cv));
-
-      // 2-1. 해당 깊이 노드가 모두 프러스텀 밖이면 더 얕은 깊이로 fallback
-      //      (depth 5 노드가 sparse해서 현재 시점에 없을 때 빈 화면 방지)
-      if (visibleKeys.length === 0 && targetDepth > 0) {
-        for (let d = targetDepth - 1; d >= 0; d--) {
-          const fc = this._candidatesAt(d);
-          visibleKeys = fc.filter(k => isInFrustum(this._sphere(k), cv));
-          if (visibleKeys.length > 0) { targetDepth = d; candidates = fc; break; }
-        }
-      }
-
+      // 1. BFS + SSE로 이번 프레임에 렌더링할 노드 집합 결정
+      const { visibleKeys, culled, maxDepth } = this._selectNodesBFS();
       const targetSet = new Set(visibleKeys);
-      const culled    = candidates.length - visibleKeys.length;
 
-      // 3. 캐시 히트 → 즉시 표시
+      // 2. 캐시 히트 → 즉시 표시
       const toLoad = [];
       for (const key of visibleKeys) {
         if (this._cache.has(key)) {
@@ -181,7 +225,7 @@ export class CopcDataSource {
         }
       }
 
-      // 4. 화면 중앙에 가까운 노드부터 로드
+      // 3. 화면 중앙에 가까운 노드부터 로드 (시점 중심 우선)
       const camPos = camera.position;
       const camDir = camera.direction;
       toLoad.sort((a, b) => {
@@ -194,10 +238,10 @@ export class CopcDataSource {
         return Cesium.Cartesian3.dot(vB, camDir) - Cesium.Cartesian3.dot(vA, camDir);
       });
 
-      this._emit({ depth: targetDepth, visible: visibleKeys.length, culled,
+      this._emit({ depth: maxDepth, visible: visibleKeys.length, culled,
         loading: toLoad.length, cached: this._cache.size, height });
 
-      // 5. 캐시 미스 로드
+      // 4. 캐시 미스 → 노드 로드
       let loadedCount = 0;
       await this._runConcurrent(toLoad.map(key => async () => {
         const data = await loadNode(
@@ -208,20 +252,20 @@ export class CopcDataSource {
         this._viewer.scene.primitives.add(data.collection);
         this._cache.set(key, data);
         loadedCount++;
-        this._emit({ depth: targetDepth, visible: visibleKeys.length, culled,
+        this._emit({ depth: maxDepth, visible: visibleKeys.length, culled,
           loading: toLoad.length - loadedCount, cached: this._cache.size, height });
       }));
 
-      // 6. 로딩 완료 후 비대상 노드 숨기기
+      // 5. 비대상 노드 숨기기
       for (const [key, data] of this._cache) {
         if (!targetSet.has(key)) data.collection.show = false;
       }
 
-      // 7. LRU eviction
+      // 6. LRU eviction
       this._evict(targetSet);
 
-      // 8. targetSet 노드에 대해서만 최신 프러스텀으로 최종 동기화
-      //    (전체 캐시 순회 시 비대상 노드가 frustum 기준으로 re-show되는 것 방지)
+      // 7. targetSet 최종 프러스텀 동기화
+      //    (로드 중 카메라 이동 시 현재 시점 기준으로 재확인)
       const cv2 = getCullingVolume(camera);
       for (const key of targetSet) {
         const data = this._cache.get(key);
@@ -232,7 +276,7 @@ export class CopcDataSource {
         .filter(k => this._cache.has(k))
         .reduce((s, k) => s + this._cache.get(k).pointCount, 0);
 
-      this._emit({ depth: targetDepth, visible: visibleKeys.length, culled,
+      this._emit({ depth: maxDepth, visible: visibleKeys.length, culled,
         loading: 0, points: visiblePoints, cached: this._cache.size, height });
 
     } finally {
@@ -242,12 +286,6 @@ export class CopcDataSource {
         this._updateLoD();
       }
     }
-  }
-
-  _candidatesAt(depth) {
-    return Object.keys(this._nodes).filter(
-      k => getDepth(k) === depth && this._nodes[k].pointCount > 0
-    );
   }
 
   _evict(keepSet) {
