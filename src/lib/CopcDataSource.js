@@ -464,8 +464,9 @@ export class CopcDataSource {
     }
     this._cache.clear();
     this._inScene.clear();
-    // 컨테이너 자체를 씬에서 제거 (destroyPrimitives:false 이므로 위에서 수동 destroy)
+    // scene.primitives.destroyPrimitives 가 기본 true 이므로
+    // remove() 가 _container.destroy() 를 자동 호출한다.
+    // 수동 destroy() 를 추가로 호출하면 이중 파괴 오류가 발생하므로 제거.
     this._viewer.scene.primitives.remove(this._container);
-    this._container.destroy();
   }
 }
