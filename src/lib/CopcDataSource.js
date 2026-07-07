@@ -1,10 +1,12 @@
 import * as Cesium from 'cesium';
 import { Copc } from 'copc';
+import proj4 from 'proj4';
 import {
   heightToDepth, getDepth,
   getNodeBoundingSphere, getCullingVolume, isInFrustum,
 } from './lod.js';
 import { loadNode } from './loader.js';
+import { WorkerPool } from './WorkerPool.js';
 
 /**
  * CopcDataSource
@@ -26,8 +28,9 @@ export class CopcDataSource {
    * @param {Cesium.Viewer} viewer
    * @param {object} options
    * @param {string}  options.proj          COPC 데이터의 좌표계 EPSG 코드 (기본: 'EPSG:4326')
+   * @param {string}  options.projDef       proj4 정의 문자열 (proj ≠ EPSG:4326 일 때 필수)
    * @param {number}  options.geoidOffset   지오이드 보정값 m (기본: 0)
-   * @param {number}  options.concurrency   동시 노드 로드 수 (기본: 5)
+   * @param {number}  options.concurrency   동시 노드 로드 수 / Worker 풀 크기 (기본: 5)
    * @param {number}  options.debounceMs    카메라 정지 후 LoD 갱신 대기 ms (기본: 300)
    * @param {number}  options.maxCacheNodes LRU 캐시 최대 노드 수 (기본: 80)
    * @param {number}  options.pixelSize     점 크기 px (기본: 2)
@@ -36,6 +39,7 @@ export class CopcDataSource {
     this._viewer   = viewer;
     this._opts     = {
       proj:          'EPSG:4326',
+      projDef:       null,
       geoidOffset:   0,
       concurrency:   5,
       debounceMs:    300,
@@ -43,6 +47,17 @@ export class CopcDataSource {
       pixelSize:     2,
       ...options,
     };
+
+    // 메인 스레드용 proj4 정의 등록 (BoundingSphere 계산에 필요)
+    if (this._opts.proj !== 'EPSG:4326' && this._opts.projDef) {
+      proj4.defs(this._opts.proj, this._opts.projDef);
+    }
+
+    // Worker 풀: concurrency 수만큼 Worker 생성
+    this._pool = new WorkerPool(
+      new URL('./worker.js', import.meta.url),
+      this._opts.concurrency,
+    );
 
     // key → { collection, pointCount, lastUsed }
     this._cache        = new Map();
@@ -174,8 +189,9 @@ export class CopcDataSource {
     let loadedCount = 0;
     await this._runConcurrent(toLoad.map(key => async () => {
       const data = await loadNode(
-        this._url, this._copc, this._nodes[key],
-        this._opts.proj, this._opts.geoidOffset, this._opts.pixelSize,
+        this._url, this._copc, this._nodes[key], this._pool,
+        this._opts.proj, this._opts.projDef,
+        this._opts.geoidOffset, this._opts.pixelSize,
       );
       this._viewer.scene.primitives.add(data.collection);
       this._cache.set(key, data);
@@ -229,9 +245,8 @@ export class CopcDataSource {
   }
 
   async _runConcurrent(tasks) {
-    let i = 0;
-    const worker = async () => { while (i < tasks.length) await tasks[i++](); };
-    await Promise.all(Array.from({ length: this._opts.concurrency }, worker));
+    // WorkerPool이 내부적으로 concurrency를 관리하므로 모두 동시에 시작
+    await Promise.all(tasks.map(t => t()));
   }
 
   _startListening() {
@@ -270,6 +285,7 @@ export class CopcDataSource {
   destroy() {
     clearTimeout(this._debounceTimer);
     if (this._removeCameraListener) this._removeCameraListener();
+    this._pool.destroy();
     for (const data of this._cache.values()) {
       this._viewer.scene.primitives.remove(data.collection);
     }

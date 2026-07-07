@@ -1,6 +1,5 @@
 import * as Cesium from 'cesium';
 import 'cesium/Build/Cesium/Widgets/widgets.css';
-import proj4 from 'proj4';
 import { CopcDataSource } from './lib/CopcDataSource.js';
 
 // ── CesiumJS 초기화 ────────────────────────────────────────
@@ -13,23 +12,21 @@ const viewer = new Cesium.Viewer('cesiumContainer', {
   terrain: Cesium.Terrain.fromWorldTerrain(),
 });
 
-// ── 좌표계 정의 (CopcDataSource.load() 전에 등록) ──────────
-proj4.defs('EPSG:2992',
-  '+proj=lcc +lat_1=43 +lat_2=45.5 +lat_0=41.75 +lon_0=-120.5' +
-  ' +x_0=399999.9999999999 +y_0=0 +datum=NAD83 +units=ft +no_defs'
-);
-
 // ── 상태 표시 ──────────────────────────────────────────────
 const statusEl = document.getElementById('status');
 
 // ── 메인 ───────────────────────────────────────────────────
-const COPC_URL = 'https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz';
+const COPC_URL   = 'https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz';
+const EPSG_2992  = '+proj=lcc +lat_1=43 +lat_2=45.5 +lat_0=41.75 +lon_0=-120.5' +
+                   ' +x_0=399999.9999999999 +y_0=0 +datum=NAD83 +units=ft +no_defs';
 
 async function main() {
   statusEl.innerHTML = '📡 COPC 파일 초기화 중...';
 
+  // projDef를 전달하면 CopcDataSource가 메인 스레드 + Worker 양쪽에 등록
   const ds = await CopcDataSource.load(COPC_URL, viewer, {
     proj:          'EPSG:2992',
+    projDef:       EPSG_2992,
     geoidOffset:   -20,
     concurrency:   5,
     debounceMs:    300,

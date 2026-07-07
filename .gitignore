@@ -225,9 +225,8 @@ $RECYCLE.BIN/
 cesium-test.html
 poc.html
 
-# node_modules에서 복사한 파일
-laz-perf.js
-laz-perf.wasm
+# 로컬 빌드 산출물
+public/
 
 # 환경변수 (토큰 포함)
 .env.local
