@@ -43,14 +43,44 @@ export class WorkerPool {
 
   /**
    * Worker에 메시지를 보내고 결과를 Promise로 반환합니다.
-   * @param {object}      msg         postMessage에 전달할 데이터
-   * @param {Transferable[]} [transfer=[]]  Transferable 객체 목록
+   * @param {object}         msg           postMessage에 전달할 데이터
+   * @param {Transferable[]} [transfer=[]] Transferable 객체 목록
+   * @param {number}         [timeoutMs=30000] 응답 타임아웃 (ms). 초과 시 reject
    */
-  run(msg, transfer = []) {
+  run(msg, transfer = [], timeoutMs = 30_000) {
     const id = String(++this._counter);
+
     return new Promise((resolve, reject) => {
-      this._queue.push({ id, msg: { ...msg, id }, transfer, resolve, reject });
+      let timerId;
+      let settled = false;
+
+      const settle = (fn, val) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timerId);
+        fn(val);
+      };
+
+      this._queue.push({
+        id,
+        msg: { ...msg, id },
+        transfer,
+        resolve: (val) => settle(resolve, val),
+        reject:  (err) => settle(reject,  err),
+      });
       this._flush();
+
+      timerId = setTimeout(() => {
+        if (this._pending.has(id)) {
+          // pending에서 제거. 워커가 뒤늦게 응답하면 _onResult에서 idle 복귀됨
+          this._pending.delete(id);
+        } else {
+          // 아직 큐에서 대기 중이면 제거
+          const qi = this._queue.findIndex(q => q.id === id);
+          if (qi !== -1) this._queue.splice(qi, 1);
+        }
+        settle(reject, new Error(`Worker 응답 타임아웃 (${timeoutMs}ms)`));
+      }, timeoutMs);
     });
   }
 
@@ -75,12 +105,14 @@ export class WorkerPool {
   }
 
   _onResult({ id, error, ...data }, worker) {
-    const pending = this._pending.get(id);
-    if (!pending) return;
-    this._pending.delete(id);
+    // 타임아웃으로 pending이 제거된 경우에도 워커는 항상 idle로 복귀
     this._idle.push(worker);
+    this._flush();
+
+    const pending = this._pending.get(id);
+    if (!pending) return; // 이미 타임아웃 처리됨
+    this._pending.delete(id);
     if (error) pending.reject(new Error(error));
     else       pending.resolve(data);
-    this._flush();
   }
 }

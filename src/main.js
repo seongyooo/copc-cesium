@@ -52,4 +52,5 @@ async function main() {
 main().catch(err => {
   statusEl.innerHTML = `❌ 오류: ${err.message}`;
   console.error(err);
+  viewer.destroy();
 });

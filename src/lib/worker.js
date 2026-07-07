@@ -24,16 +24,34 @@ function lonLatAltToCartesian(lonDeg, latDeg, altM) {
   ];
 }
 
-let _projReady = false;
+// srcProj별 등록 여부 추적 (boolean 플래그 대신 Set 사용)
+// Worker 재생성 시 Set이 초기화되므로 자동으로 재등록됨
+const _registeredProjs = new Set();
 
 self.onmessage = ({ data }) => {
   const { id, xs, ys, zs, rs, gs, bs, pointCount, srcProj, projDef, geoidOffset } = data;
 
   try {
-    // proj4 정의 최초 1회 등록
-    if (!_projReady && srcProj !== 'EPSG:4326' && projDef) {
+    // 입력값 검증
+    if (!Number.isInteger(pointCount) || pointCount < 0 || pointCount > 10_000_000) {
+      throw new Error(`유효하지 않은 pointCount: ${pointCount}`);
+    }
+
+    // proj4 정의 등록 (srcProj별 1회, Worker 재생성 시에도 재등록)
+    if (srcProj !== 'EPSG:4326' && projDef && !_registeredProjs.has(srcProj)) {
       proj4.defs(srcProj, projDef);
-      _projReady = true;
+      _registeredProjs.add(srcProj);
+    }
+
+    // proj4 설정 검증: 첫 포인트로 빠른 실패 (전체 루프 전에 감지)
+    if (srcProj !== 'EPSG:4326' && pointCount > 0) {
+      const [testLon, testLat] = proj4(srcProj, 'EPSG:4326', [xs[0], ys[0]]);
+      if (!isFinite(testLon) || !isFinite(testLat)) {
+        throw new Error(
+          `proj4 변환 실패 (NaN): srcProj=${srcProj}, x=${xs[0]}, y=${ys[0]}. ` +
+          `projDef가 올바른지 확인하세요.`
+        );
+      }
     }
 
     const positions = new Float64Array(pointCount * 3);

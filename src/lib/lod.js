@@ -70,6 +70,12 @@ export function getNodeBoundingSphere(key, rootCenter, rootHalfSize, srcProj, ge
   const cz = rootCenter.z - rootHalfSize + (2 * zi + 1) * nodeHalfSize;
 
   const [lon, lat] = proj4(srcProj, 'EPSG:4326', [cx, cy]);
+  if (!isFinite(lon) || !isFinite(lat)) {
+    throw new Error(
+      `getNodeBoundingSphere: proj4 변환 실패 (key=${key}, srcProj=${srcProj}). ` +
+      `projDef가 올바른지 확인하세요.`
+    );
+  }
   const center = Cesium.Cartesian3.fromDegrees(lon, lat, cz * 0.3048 + geoidOffset);
   const radius = nodeHalfSize * 0.3048 * Math.sqrt(3);
 

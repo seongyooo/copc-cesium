@@ -26,9 +26,20 @@ export async function loadNode(url, copc, nodeInfo, pool, srcProj, projDef, geoi
   const getX = view.getter('X');
   const getY = view.getter('Y');
   const getZ = view.getter('Z');
-  const getR = view.getter('Red');
-  const getG = view.getter('Green');
-  const getB = view.getter('Blue');
+
+  // RGB 채널 유무 확인 (LAS Format 0/1 등에는 RGB 없음)
+  // view.getter가 존재하지 않는 차원에 대해 throw할 수 있으므로 try-catch 사용
+  let getR, getG, getB;
+  try { getR = view.getter('Red');   } catch { /* RGB 없음 */ }
+  try { getG = view.getter('Green'); } catch { /* RGB 없음 */ }
+  try { getB = view.getter('Blue');  } catch { /* RGB 없음 */ }
+  const hasRGB = !!(getR && getG && getB);
+
+  // RGB 없으면 Intensity로 grayscale fallback, 그것도 없으면 흰색(65535)
+  let getI;
+  if (!hasRGB) {
+    try { getI = view.getter('Intensity'); } catch { /* Intensity도 없음 */ }
+  }
 
   // raw 배열 추출 후 Worker로 전송 (Transferable)
   const xs = new Float64Array(n);
@@ -39,8 +50,14 @@ export async function loadNode(url, copc, nodeInfo, pool, srcProj, projDef, geoi
   const bs = new Float32Array(n);
 
   for (let i = 0; i < n; i++) {
-    xs[i] = getX(i);  ys[i] = getY(i);  zs[i] = getZ(i);
-    rs[i] = getR(i);  gs[i] = getG(i);  bs[i] = getB(i);
+    xs[i] = getX(i); ys[i] = getY(i); zs[i] = getZ(i);
+    if (hasRGB) {
+      rs[i] = getR(i); gs[i] = getG(i); bs[i] = getB(i);
+    } else if (getI) {
+      rs[i] = gs[i] = bs[i] = getI(i); // intensity → grayscale (0-65535 그대로, Worker에서 /65535)
+    } else {
+      rs[i] = gs[i] = bs[i] = 65535;   // 흰색 fallback
+    }
   }
 
   // Worker: proj4 변환 + WGS84 계산
