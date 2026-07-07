@@ -6,6 +6,10 @@ import proj4 from 'proj4';
 // ── 설정 ───────────────────────────────────────────────────
 const CONCURRENCY = 5;
 const DEBOUNCE_MS = 300;
+const MAX_CACHE_NODES = 80; // GPU에 유지할 최대 노드 수 (LRU eviction)
+// 지오이드 보정: COPC Z(NAVD88 정표고) → CesiumJS(WGS84 타원체고)
+// 오레곤 오이진 지역 EGM96 지오이드 보정값 ≈ -20m (지형과 맞지 않으면 조정)
+const GEOID_OFFSET = -20;
 
 // height: 카메라 고도(m), maxDepth: 실제 데이터의 최대 깊이
 function heightToDepth(height, maxDepth) {
@@ -29,6 +33,7 @@ const viewer = new Cesium.Viewer('cesiumContainer', {
   baseLayerPicker: false, geocoder: false, homeButton: false,
   sceneModePicker: false, navigationHelpButton: false,
   animation: false, timeline: false, fullscreenButton: false,
+  terrain: Cesium.Terrain.fromWorldTerrain(),
 });
 
 // ── 좌표계 정의 ────────────────────────────────────────────
@@ -71,14 +76,26 @@ function getNodeBoundingSphere(key, rootCenter, rootHalfSize) {
   return new Cesium.BoundingSphere(center, radius);
 }
 
-// ── 프러스텀 컬링: 노드가 카메라 시야 안에 있는지 확인 ──────
-function isNodeInFrustum(boundingSphere) {
-  const cullingVolume = viewer.camera.frustum.computeCullingVolume(
+// ── 프러스텀 컬링 볼륨 계산 (매 호출마다 새로 계산) ────────
+function getCullingVolume() {
+  return viewer.camera.frustum.computeCullingVolume(
     viewer.camera.position,
     viewer.camera.direction,
     viewer.camera.up
   );
+}
+
+function isNodeInFrustum(boundingSphere, cullingVolume) {
   return cullingVolume.computeVisibility(boundingSphere) !== Cesium.Intersect.OUTSIDE;
+}
+
+// ── 빠른 경로: 캐시된 노드의 show/hide만 즉시 갱신 (네트워크 요청 없음) ──
+function updateVisibility(rootCenter, rootHalfSize) {
+  const cv = getCullingVolume();
+  for (const [key, data] of nodeCache) {
+    const sphere = getNodeBoundingSphere(key, rootCenter, rootHalfSize);
+    data.collection.show = isNodeInFrustum(sphere, cv);
+  }
 }
 
 // ── 노드 로드 및 렌더링 ────────────────────────────────────
@@ -97,20 +114,21 @@ async function loadNode(url, copc, nodeInfo) {
   for (let i = 0; i < view.pointCount; i++) {
     const [lon, lat] = proj4('EPSG:2992', 'EPSG:4326', [getX(i), getY(i)]);
     collection.add({
-      position: Cesium.Cartesian3.fromDegrees(lon, lat, getZ(i) * 0.3048),
+      position: Cesium.Cartesian3.fromDegrees(lon, lat, getZ(i) * 0.3048 + GEOID_OFFSET),
       pixelSize: 2,
       color: new Cesium.Color(getR(i) / 65535, getG(i) / 65535, getB(i) / 65535, 1.0),
     });
   }
 
-  return { collection, pointCount: view.pointCount };
+  return { collection, pointCount: view.pointCount, lastUsed: Date.now() };
 }
 
-// ── LoD + 프러스텀 컬링 ────────────────────────────────────
+// ── LoD + 프러스텀 컬링 + 캐싱 ───────────────────────────
 const COPC_URL = 'https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz';
 
-const loadedNodes = new Map();
-let currentDepth = -1;
+// nodeCache: 로드된 모든 노드 보관 (GPU 메모리 유지, show/hide로 제어)
+// key → { collection, pointCount, lastUsed }
+const nodeCache = new Map();
 let isUpdating = false;
 let pendingUpdate = false;
 
@@ -120,7 +138,6 @@ async function updateLoD(copc, nodes, rootCenter, rootHalfSize, maxDepth) {
 
   const height = viewer.camera.positionCartographic.height;
   const targetDepth = heightToDepth(height, maxDepth);
-  currentDepth = targetDepth;
 
   // 1. 목표 깊이 노드 후보 선택
   let candidates = Object.keys(nodes).filter(
@@ -137,35 +154,51 @@ async function updateLoD(copc, nodes, rootCenter, rootHalfSize, maxDepth) {
     }
   }
 
-  // 2. 프러스텀 컬링: 시야 밖 노드 제거
+  // 2. 프러스텀 컬링: 시야 밖 노드 제거 (cullingVolume 한 번만 계산)
+  const cv = getCullingVolume();
   const visibleKeys = candidates.filter(key => {
     const sphere = getNodeBoundingSphere(key, rootCenter, rootHalfSize);
-    return isNodeInFrustum(sphere);
+    return isNodeInFrustum(sphere, cv);
   });
 
   const targetSet = new Set(visibleKeys);
   const culled = candidates.length - visibleKeys.length;
 
-  log(`🔄 깊이 ${targetDepth} 로딩 중...<br>
-    시야 내 노드: <b>${visibleKeys.length}</b>개 (컬링: ${culled}개 제거)<br>
-    고도: <b>${Math.round(height)}m</b>`);
-
-  // 3. 시야 밖으로 나간 노드 제거
-  for (const [key, data] of loadedNodes) {
-    if (!targetSet.has(key)) {
-      viewer.scene.primitives.remove(data.collection);
-      loadedNodes.delete(key);
+  // 3. 캐시 히트: 재로드 없이 바로 표시 + lastUsed 갱신
+  const toLoad = [];
+  for (const key of visibleKeys) {
+    if (nodeCache.has(key)) {
+      const data = nodeCache.get(key);
+      data.collection.show = true;
+      data.lastUsed = Date.now();
+    } else {
+      toLoad.push(key);
     }
   }
 
-  // 4. 새로 보이는 노드 로드
-  const toLoad = visibleKeys.filter(k => !loadedNodes.has(k));
-  let loaded = 0;
+  const cacheHits = visibleKeys.length - toLoad.length;
+  log(`🔄 깊이 ${targetDepth} 로딩 중... (캐시 히트 ${cacheHits}개)<br>
+    신규 로드: <b>${toLoad.length}</b>개 | 고도: <b>${Math.round(height)}m</b>`);
 
+  // 4. 캐시 미스: 화면 중앙에 가까운 노드부터 로드
+  //    카메라 방향 벡터와 노드 중심 벡터의 dot product가 클수록 중앙에 가까움
+  const camPos = viewer.camera.position;
+  const camDir = viewer.camera.direction;
+  toLoad.sort((a, b) => {
+    const sA = getNodeBoundingSphere(a, rootCenter, rootHalfSize);
+    const sB = getNodeBoundingSphere(b, rootCenter, rootHalfSize);
+    const vA = Cesium.Cartesian3.normalize(
+      Cesium.Cartesian3.subtract(sA.center, camPos, new Cesium.Cartesian3()), new Cesium.Cartesian3());
+    const vB = Cesium.Cartesian3.normalize(
+      Cesium.Cartesian3.subtract(sB.center, camPos, new Cesium.Cartesian3()), new Cesium.Cartesian3());
+    return Cesium.Cartesian3.dot(vB, camDir) - Cesium.Cartesian3.dot(vA, camDir);
+  });
+
+  let loaded = 0;
   await runWithConcurrency(
     toLoad.map(key => async () => {
       const data = await loadNode(COPC_URL, copc, nodes[key]);
-      loadedNodes.set(key, data);
+      nodeCache.set(key, data);
       loaded++;
       log(`🔄 깊이 ${targetDepth} 로딩 중... ${loaded}/${toLoad.length}<br>
         고도: <b>${Math.round(height)}m</b>`);
@@ -173,9 +206,34 @@ async function updateLoD(copc, nodes, rootCenter, rootHalfSize, maxDepth) {
     CONCURRENCY
   );
 
-  const totalPoints = [...loadedNodes.values()].reduce((s, d) => s + d.pointCount, 0);
-  log(`✅ 깊이: <b>${targetDepth}</b> | 노드: <b>${loadedNodes.size}</b>개 (컬링 ${culled}개)<br>
-    점: <b>${totalPoints.toLocaleString()}</b>개 | 고도: <b>${Math.round(height)}m</b>`);
+  // 5. 로딩 완료 후 targetSet에 없는 노드만 숨기기 (로딩 중엔 이전 노드 유지)
+  for (const [key, data] of nodeCache) {
+    if (!targetSet.has(key)) {
+      data.collection.show = false;
+    }
+  }
+
+  // 6. LRU eviction: 현재 보이지 않는 노드 중 오래된 것 제거
+  if (nodeCache.size > MAX_CACHE_NODES) {
+    const evictCount = nodeCache.size - MAX_CACHE_NODES;
+    const evictCandidates = [...nodeCache.entries()]
+      .filter(([key]) => !targetSet.has(key))          // 현재 보이는 것 제외
+      .sort((a, b) => a[1].lastUsed - b[1].lastUsed);  // 오래된 순 정렬
+    for (const [key, data] of evictCandidates.slice(0, evictCount)) {
+      viewer.scene.primitives.remove(data.collection);
+      nodeCache.delete(key);
+    }
+  }
+
+  const visiblePoints = visibleKeys
+    .filter(k => nodeCache.has(k))
+    .reduce((s, k) => s + nodeCache.get(k).pointCount, 0);
+
+  log(`✅ 깊이: <b>${targetDepth}</b> | 표시: <b>${visibleKeys.length}</b>개 (컬링 ${culled}개)<br>
+    점: <b>${visiblePoints.toLocaleString()}</b>개 | 캐시: ${nodeCache.size}/${MAX_CACHE_NODES} | 고도: <b>${Math.round(height)}m</b>`);
+
+  // updateLoD 완료 후 최종 프러스텀 상태 동기화
+  updateVisibility(rootCenter, rootHalfSize);
 
   isUpdating = false;
   if (pendingUpdate) {
@@ -207,19 +265,32 @@ async function main() {
   const maxDepth = Math.max(...Object.keys(nodes).map(getDepth));
   console.log('총 노드 수:', Object.keys(nodes).length, '| 최대 깊이:', maxDepth);
 
-  await viewer.camera.flyTo({
-    destination: Cesium.Cartesian3.fromDegrees(-123.069, 44.057, 15000),
-    orientation: {
-      heading: Cesium.Math.toRadians(0),
-      pitch: Cesium.Math.toRadians(-45),
-      roll: 0,
-    },
+  // 루트 노드 바운딩 스피어로 flyToBoundingSphere → 데이터 중심을 정확히 바라봄
+  const rootSphere = getNodeBoundingSphere('0-0-0-0', rootCenter, rootHalfSize);
+  await new Promise(resolve => {
+    viewer.camera.flyToBoundingSphere(rootSphere, {
+      offset: new Cesium.HeadingPitchRange(
+        Cesium.Math.toRadians(0),
+        Cesium.Math.toRadians(-45),
+        rootSphere.radius * 4,
+      ),
+      complete: resolve,
+    });
   });
 
   await updateLoD(copc, nodes, rootCenter, rootHalfSize, maxDepth);
 
+  // 카메라 변화 감도 높이기 (기본값 0.5 → 0.01)
+  viewer.camera.percentageChanged = 0.01;
+
   let debounceTimer = null;
   viewer.camera.changed.addEventListener(() => {
+    // 빠른 경로: updateLoD 실행 중이 아닐 때만 show/hide 갱신
+    // (실행 중 호출 시 방금 로드한 노드를 덮어쓰는 race condition 방지)
+    if (!isUpdating) {
+      updateVisibility(rootCenter, rootHalfSize);
+    }
+    // 느린 경로: 디바운스 후 새 노드 로드
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(
       () => updateLoD(copc, nodes, rootCenter, rootHalfSize, maxDepth),
