@@ -69,8 +69,32 @@
       backdrop-filter: blur(4px);
     }
     .ctrl-btn:hover { background: rgba(40, 44, 60, 0.95); color: #fff; }
-    .ctrl-btn.on  { color: #4a9eff; border-color: #4a9eff; }
-    .ctrl-btn.off { color: #ff6b6b; border-color: #ff6b6b; }
+
+    #layerSelect {
+      padding: 4px 8px; border-radius: 4px;
+      background: #1a1d24; color: #eee;
+      border: 1px solid #444; font-size: 12px; font-family: monospace;
+      cursor: pointer;
+    }
+    #layerSelect:focus { border-color: #4a9eff; outline: none; }
+
+    #pixelSizeSlider {
+      width: 90px; cursor: pointer; vertical-align: middle; accent-color: #4a9eff;
+    }
+    #pixelSizeVal { color: #4a9eff; }
+
+    /* ── 분류 필터 패널 ────────────────────────────────────── */
+    #classPanel {
+      position: fixed; top: 54px; left: 290px;
+      background: rgba(0,0,0,0.75); color: #fff;
+      padding: 10px 14px; border-radius: 6px;
+      font-family: monospace; font-size: 12px;
+      min-width: 160px; z-index: 999;
+      line-height: 1.8;
+    }
+    #classPanel b { font-size: 13px; display: block; margin-bottom: 4px; }
+    .cls-row { display: flex; align-items: center; gap: 6px; }
+    .cls-row input { cursor: pointer; accent-color: #4a9eff; margin: 0; }
   </style>
 </head>
 <body>
@@ -86,14 +110,30 @@
     <button class="preset-btn" data-preset="autzen">Autzen Stadium</button>
     <button class="preset-btn" data-preset="sofi">SoFi Stadium</button>
     <button class="preset-btn" data-preset="trestle">Trestle Bridge</button>
+    <div class="sep"></div>
+    <label>지도</label>
+    <select id="layerSelect">
+      <option value="satellite">위성</option>
+      <option value="osm">도로(OSM)</option>
+      <option value="none">없음</option>
+    </select>
+    <div class="sep"></div>
+    <label>점 크기 <span id="pixelSizeVal">2</span>px</label>
+    <input id="pixelSizeSlider" type="range" min="1" max="8" step="0.5" value="2">
   </div>
 
   <!-- 상태 패널 -->
   <div id="status">초기화 중...</div>
 
-  <!-- 우측 하단 컨트롤 -->
-  <div id="controls">
-    <button id="satelliteBtn" class="ctrl-btn on">🛰 위성지도 ON</button>
+  <!-- 분류 필터 패널 (데이터 로드 후 표시) -->
+  <div id="classPanel" style="display:none">
+    <b>분류 필터</b>
+    <div class="cls-row">
+      <input type="checkbox" id="allClassCheck" checked>
+      <label for="allClassCheck">전체 선택/해제</label>
+    </div>
+    <hr style="border-color:#444; margin:5px 0">
+    <div id="classCheckboxes"></div>
   </div>
 
   <!-- fetch 패치: Range 요청에만 cache:'no-store' 적용 (ERR_CACHE_OPERATION_NOT_SUPPORTED 우회).

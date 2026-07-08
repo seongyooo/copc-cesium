@@ -35,25 +35,114 @@ const PRESETS = {
 };
 
 // ── UI 요소 ────────────────────────────────────────────────
-const statusEl      = document.getElementById('status');
-const urlInput      = document.getElementById('urlInput');
-const loadBtn       = document.getElementById('loadBtn');
-const satelliteBtn  = document.getElementById('satelliteBtn');
-const presetBtns    = document.querySelectorAll('.preset-btn');
+const statusEl          = document.getElementById('status');
+const urlInput          = document.getElementById('urlInput');
+const loadBtn           = document.getElementById('loadBtn');
+const layerSelect       = document.getElementById('layerSelect');
+const pixelSizeSlider   = document.getElementById('pixelSizeSlider');
+const pixelSizeVal      = document.getElementById('pixelSizeVal');
+const classPanel        = document.getElementById('classPanel');
+const allClassCheck     = document.getElementById('allClassCheck');
+const classCheckboxes   = document.getElementById('classCheckboxes');
+const presetBtns        = document.querySelectorAll('.preset-btn');
 
 // ── 현재 로드된 데이터소스 ─────────────────────────────────
 let currentDs        = null;
 let activePreset     = null;   // 현재 활성화된 프리셋 key
 let activePresetOpts = null;   // 활성 프리셋의 옵션 (불러오기 버튼에서 재사용)
 
-// ── 위성지도 토글 ──────────────────────────────────────────
-let satelliteOn = true;
+// ── 지도 레이어 선택 ───────────────────────────────────────
+layerSelect.addEventListener('change', async () => {
+  const type = layerSelect.value;
+  viewer.imageryLayers.removeAll();
+  if (type === 'satellite') {
+    const provider = await Cesium.IonImageryProvider.fromAssetId(2);
+    viewer.imageryLayers.addImageryProvider(provider);
+  } else if (type === 'osm') {
+    viewer.imageryLayers.addImageryProvider(
+      new Cesium.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' }),
+    );
+  }
+  // type === 'none': removeAll()로 이미 제거됨
+});
 
-satelliteBtn.addEventListener('click', () => {
-  satelliteOn = !satelliteOn;
-  viewer.imageryLayers.get(0).show = satelliteOn;
-  satelliteBtn.textContent  = satelliteOn ? '🛰 위성지도 ON' : '🌑 위성지도 OFF';
-  satelliteBtn.className    = 'ctrl-btn ' + (satelliteOn ? 'on' : 'off');
+// ── 점 크기 슬라이더 ───────────────────────────────────────
+pixelSizeSlider.addEventListener('input', () => {
+  const v = parseFloat(pixelSizeSlider.value);
+  pixelSizeVal.textContent = v;
+  if (currentDs) currentDs.pixelSize = v;
+});
+
+// ── 분류 필터 ──────────────────────────────────────────────
+const ASPRS_NAMES = {
+  0: '미분류(0)', 1: '미분류(1)', 2: '지면', 3: '낮은 식생',
+  4: '중간 식생', 5: '높은 식생', 6: '건물', 7: '잡음(저점)',
+  8: '예약(8)', 9: '수면', 10: '철도', 11: '도로면',
+  12: '중첩점', 13: '와이어(가드)', 14: '와이어(전선)',
+  15: '송전탑', 16: '와이어(연결)', 17: '브리지', 18: '잡음(고점)',
+};
+
+let _renderedClasses = new Set(); // 현재 체크박스가 만들어진 클래스 집합
+
+function updateClassMask() {
+  if (!currentDs) return;
+  // "전체 선택" 상태면 -1 사용: 아직 발견 안 된 클래스도 자동 표시
+  if (allClassCheck.checked) {
+    currentDs.setClassMask(-1);
+    return;
+  }
+  const checks = classCheckboxes.querySelectorAll('.cls-check');
+  let mask = 0;
+  checks.forEach(cb => {
+    if (cb.checked) mask |= (1 << parseInt(cb.dataset.cls, 10));
+  });
+  currentDs.setClassMask(mask);
+}
+
+function refreshClassPanel(seenClasses) {
+  if (!seenClasses || seenClasses.size === 0) {
+    classPanel.style.display = 'none';
+    return;
+  }
+
+  // 새로 발견된 클래스만 추가 (기존 체크박스 유지)
+  let changed = false;
+  for (const c of seenClasses) {
+    if (!_renderedClasses.has(c)) { _renderedClasses.add(c); changed = true; }
+  }
+  if (!changed) return;
+
+  // 오름차순 재정렬
+  const sorted = [..._renderedClasses].sort((a, b) => a - b);
+  classCheckboxes.innerHTML = '';
+  for (const c of sorted) {
+    const label = ASPRS_NAMES[c] ?? `클래스 ${c}`;
+    const row = document.createElement('div');
+    row.className = 'cls-row';
+    row.innerHTML =
+      `<input type="checkbox" class="cls-check" id="cls${c}" data-cls="${c}" checked>` +
+      `<label for="cls${c}">${label}</label>`;
+    classCheckboxes.appendChild(row);
+  }
+  classCheckboxes.querySelectorAll('.cls-check').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const checks = classCheckboxes.querySelectorAll('.cls-check');
+      const allChecked = [...checks].every(c => c.checked);
+      allClassCheck.checked = allChecked;
+      updateClassMask();
+    });
+  });
+
+  classPanel.style.display = sorted.length > 1 ? '' : 'none';
+
+  // 사용자가 커스텀 필터 중이면 새로 발견된 클래스를 마스크에 반영
+  if (!allClassCheck.checked) updateClassMask();
+}
+
+allClassCheck.addEventListener('change', () => {
+  const checked = allClassCheck.checked;
+  classCheckboxes.querySelectorAll('.cls-check').forEach(cb => { cb.checked = checked; });
+  updateClassMask();
 });
 
 // ── 데이터 로드 함수 ───────────────────────────────────────
@@ -75,6 +164,12 @@ async function loadCopc(url, opts = {}) {
     currentDs = null;
   }
 
+  // 분류 패널 초기화
+  classPanel.style.display = 'none';
+  classCheckboxes.innerHTML = '';
+  allClassCheck.checked = true;
+  _renderedClasses = new Set();
+
   loadBtn.disabled = true;
   statusEl.innerHTML = '📡 COPC 파일 초기화 중...';
 
@@ -86,7 +181,7 @@ async function loadCopc(url, opts = {}) {
       concurrency:   5,
       debounceMs:    300,
       maxCacheNodes: 150, // B-5: maxVisibleNodes(100)보다 크게 유지해야 eviction 동작
-      pixelSize:     2,
+      pixelSize:     parseFloat(pixelSizeSlider.value),
     });
 
     // 로드 완료 전에 다른 로드가 시작됐으면 이 결과 파기
@@ -97,7 +192,8 @@ async function loadCopc(url, opts = {}) {
 
     currentDs = ds;
 
-    ds.onProgress = ({ depth, visible, culled, loading, points, cached, height }) => {
+    ds.onProgress = ({ depth, visible, culled, loading, points, cached, height, seenClasses }) => {
+      refreshClassPanel(seenClasses);
       if (loading > 0) {
         statusEl.innerHTML =
           `🔄 깊이 ${depth} 로딩 중... (남은: ${loading}개)<br>` +

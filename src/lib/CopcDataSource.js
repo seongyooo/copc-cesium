@@ -210,6 +210,12 @@ export class CopcDataSource {
     // 결과를 버려 구형 시점의 노드가 씬에 추가되는 것을 막는다.
     this._loadGen = 0;
 
+    // 모든 PointCloudPrimitive가 공유하는 ref 객체.
+    // 값만 변경하면 다음 프레임 즉시 반영 (재로드 불필요).
+    this._pixelSizeRef = { value: this._opts.pixelSize };
+    this._classMaskRef = { value: -1 }; // -1 = 전체 표시 (모든 비트 1)
+    this._seenClasses  = new Set();     // 로드된 노드에서 발견된 분류값 집합
+
     this._onProgress    = null;
     this._destroyed     = false; // A-3: 이중 호출·재진입 방지
     this._lastSphereMap = null;  // C-1: _updateVisibility proj4 재호출 방지
@@ -269,6 +275,8 @@ export class CopcDataSource {
       const [minx, miny, minz, maxx, maxy, maxz] = this._copc.info.cube;
       this._rootCenter   = { x: (minx + maxx) / 2, y: (miny + maxy) / 2, z: (minz + maxz) / 2 };
       this._rootHalfSize = (maxx - minx) / 2;
+
+      this._seenClasses.clear();
 
       const { nodes } = await Copc.loadHierarchyPage(url, this._copc.info.rootHierarchyPage);
       this._nodes    = nodes;
@@ -492,16 +500,23 @@ export class CopcDataSource {
         const data = await loadNode(
           this._url, this._copc, this._nodes[key], this._pool,
           this._opts.proj, this._opts.projDef,
-          this._opts.geoidOffset, this._opts.pixelSize,
+          this._opts.geoidOffset, this._pixelSizeRef, this._classMaskRef,
           this._opts.zFactor ?? 0.3048,
         );
 
-        // 로드 완료 후에도 세대 확인: 네트워크/파싱 중 카메라가 움직였으면 파기
+        // 로드 완료 후 세대 확인 — gen 불일치 시 씬에 추가하지 않되 캐시에 보관.
+        // 이후 카메라가 같은 위치로 돌아오면 즉시 캐시 히트로 표시됨.
         if (gen !== this._loadGen) {
-          data.collection.destroy();
+          if (!this._cache.has(key)) {
+            this._cache.set(key, data);
+            for (const c of data.seenClasses) this._seenClasses.add(c);
+          } else {
+            data.collection.destroy();
+          }
           return;
         }
 
+        for (const c of data.seenClasses) this._seenClasses.add(c);
         this._container.add(data.collection);
         this._inScene.add(key);
         this._cache.set(key, data);
@@ -608,14 +623,29 @@ export class CopcDataSource {
   }
 
   _emit(info) {
-    if (this._onProgress) this._onProgress(info);
+    if (this._onProgress) this._onProgress({ ...info, seenClasses: this._seenClasses });
   }
 
   // ── 공개 API ────────────────────────────────────────────────
 
-  /** 진행 상황 콜백. { depth, visible, culled, loading, points, cached, height } */
+  /** 진행 상황 콜백. { depth, visible, culled, loading, points, cached, height, seenClasses } */
   set onProgress(fn) { this._onProgress = fn; }
   get onProgress()   { return this._onProgress; }
+
+  /** 점 크기 px — 즉시 반영 (재로드 불필요) */
+  set pixelSize(v)   { this._pixelSizeRef.value = v; }
+  get pixelSize()    { return this._pixelSizeRef.value; }
+
+  /**
+   * 분류 필터 마스크 설정 — 즉시 반영.
+   * 비트 N이 1이면 클래스 N 표시, 0이면 숨김.
+   * -1(기본값)이면 전체 표시.
+   * @param {number} mask 32비트 정수
+   */
+  setClassMask(mask) { this._classMaskRef.value = mask; }
+
+  /** 지금까지 로드된 노드에서 발견된 분류값 집합 */
+  get seenClasses()   { return this._seenClasses; }
 
   /** 데이터의 최대 Octree 깊이 */
   get maxDepth()      { return this._maxDepth; }
