@@ -37,6 +37,10 @@ const PRESETS = {
     url:         'https://s3.amazonaws.com/grid-public-ept/20210421-FLW-Trestle-low-attitude.copc.laz',
     geoidOffset: 0,
   },
+  sandiego: {
+    label: 'San Diego 2005',
+    url:   '/sandiego.copc.laz',
+  },
 };
 
 // ── UI 요소 ────────────────────────────────────────────────
