@@ -58,8 +58,10 @@ export function screenSpaceError(sphere, camera, scene) {
  * @param {number} rootHalfSize 루트 노드 절반 크기 (COPC 좌표계)
  * @param {string} srcProj      COPC 데이터의 좌표계 EPSG 코드 (예: 'EPSG:2992')
  * @param {number} geoidOffset  지오이드 보정값 (미터)
+ * @param {number} zFactor      Z 단위 → 미터 변환 계수 (0.3048: feet, 1.0: meters)
+ * @param {number} xyFactor     XY 단위 → 미터 변환 계수 (반경 계산용; 지리좌표계면 111320)
  */
-export function getNodeBoundingSphere(key, rootCenter, rootHalfSize, srcProj, geoidOffset) {
+export function getNodeBoundingSphere(key, rootCenter, rootHalfSize, srcProj, geoidOffset, zFactor = 0.3048, xyFactor = zFactor) {
   const [level, xi, yi, zi] = key.split('-').map(Number);
   const nodeHalfSize = rootHalfSize / Math.pow(2, level);
 
@@ -74,8 +76,8 @@ export function getNodeBoundingSphere(key, rootCenter, rootHalfSize, srcProj, ge
       `projDef가 올바른지 확인하세요.`
     );
   }
-  const center = Cesium.Cartesian3.fromDegrees(lon, lat, cz * 0.3048 + geoidOffset);
-  const radius = nodeHalfSize * 0.3048 * Math.sqrt(3);
+  const center = Cesium.Cartesian3.fromDegrees(lon, lat, cz * zFactor + geoidOffset);
+  const radius = nodeHalfSize * xyFactor * Math.sqrt(3);
 
   return new Cesium.BoundingSphere(center, radius);
 }

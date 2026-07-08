@@ -25,15 +25,11 @@ const PRESETS = {
   sofi: {
     label:       'SoFi Stadium',
     url:         'https://hobu-lidar.s3.amazonaws.com/sofi.copc.laz',
-    proj:        'EPSG:4326',
-    projDef:     null,
     geoidOffset: 0,
   },
-  millsite: {
-    label:       'Millsite (USGS 3DEP)',
-    url:         'https://s3.amazonaws.com/data.entwine.io/millsite.copc.laz',
-    proj:        'EPSG:4326',
-    projDef:     null,
+  trestle: {
+    label:       'Trestle Bridge',
+    url:         'https://s3.amazonaws.com/grid-public-ept/20210421-FLW-Trestle-low-attitude.copc.laz',
     geoidOffset: 0,
   },
 };

@@ -34,7 +34,7 @@ function lonLatAltToCartesian(lonDeg, latDeg, altM) {
 const _registeredProjs = new Set();
 
 self.onmessage = ({ data }) => {
-  const { id, xs, ys, zs, rs, gs, bs, pointCount, srcProj, projDef, geoidOffset } = data;
+  const { id, xs, ys, zs, rs, gs, bs, pointCount, srcProj, projDef, geoidOffset, zFactor = 0.3048 } = data;
 
   try {
     if (!Number.isInteger(pointCount) || pointCount < 0 || pointCount > 10_000_000) {
@@ -85,7 +85,7 @@ self.onmessage = ({ data }) => {
         lat = ys[i];
       }
 
-      const alt          = zs[i] * 0.3048 + geoidOffset;
+      const alt          = zs[i] * zFactor + geoidOffset;
       const [cx, cy, cz] = lonLatAltToCartesian(lon, lat, alt);
 
       positions[i * 3]     = cx;

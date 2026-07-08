@@ -9,6 +9,129 @@ import { loadNode } from './loader.js';
 import { WorkerPool } from './WorkerPool.js';
 
 /**
+ * COMPD_CS["...", PROJCS[...], VERT_CS[...]] 에서 내부 PROJCS/GEOGCS 블록을
+ * 브래킷 카운팅으로 추출합니다. 다른 형식이면 원본을 그대로 반환합니다.
+ */
+function _extractInnerCrs(wkt) {
+  const upper = wkt.trim().toUpperCase();
+  if (!upper.startsWith('COMPD_CS')) return wkt;
+
+  // PROJCS 또는 GEOGCS 블록 시작 위치 탐색
+  for (const kw of ['PROJCS[', 'GEOGCS[', 'PROJCRS[', 'GEOGCRS[']) {
+    const idx = upper.indexOf(kw);
+    if (idx < 0) continue;
+    let depth = 0;
+    for (let i = idx; i < wkt.length; i++) {
+      if (wkt[i] === '[') depth++;
+      else if (wkt[i] === ']') {
+        depth--;
+        if (depth === 0) return wkt.slice(idx, i + 1);
+      }
+    }
+  }
+  return wkt;
+}
+
+/**
+ * WKT 문자열에서 선형 단위 계수(m/unit)를 추출합니다.
+ *   WKT2: LENGTHUNIT["unit",factor]
+ *   WKT1: PROJCS 레벨의 마지막 UNIT["unit",factor] (첫 번째는 각도 단위이므로 제외)
+ */
+function _extractLinearUnit(wkt) {
+  // WKT2 전용 LENGTHUNIT 우선 시도
+  const lenMatch = wkt.match(/LENGTHUNIT\s*\[\s*"[^"]*"\s*,\s*([\d.]+(?:[eE][+-]?\d+)?)/i);
+  if (lenMatch) {
+    const f = parseFloat(lenMatch[1]);
+    if (f > 0) return f;
+  }
+  // WKT1: 문자열에서 모든 UNIT 추출 → 마지막(선형 단위)만 사용
+  // 각도 단위(~0.01745)는 0.05 미만이므로 필터
+  const allUnits = [...wkt.matchAll(/\bUNIT\s*\[\s*"[^"]*"\s*,\s*([\d.]+(?:[eE][+-]?\d+)?)/gi)];
+  for (let i = allUnits.length - 1; i >= 0; i--) {
+    const f = parseFloat(allUnits[i][1]);
+    if (f >= 0.05) return f; // 0.3048 (feet) 또는 1.0 (metres)
+  }
+  return 1.0; // 기본값: 미터
+}
+
+/**
+ * WKT에서 EPSG 코드를 추출합니다.
+ *   WKT1: AUTHORITY["EPSG","2229"]
+ *   WKT2: ID["EPSG",2229]  (파일 끝 쪽에 위치)
+ */
+function _extractEpsgCode(wkt) {
+  // WKT2 ID["EPSG",NNNN] — 가장 바깥(마지막) ID 엔트리가 CRS 자체의 코드
+  const idMatches = [...wkt.matchAll(/\bID\s*\[\s*"EPSG"\s*,\s*(\d+)/gi)];
+  if (idMatches.length > 0) return idMatches[idMatches.length - 1][1];
+  // WKT1 AUTHORITY["EPSG","NNNN"]
+  const authMatch = wkt.match(/AUTHORITY\s*\[\s*"EPSG"\s*,\s*"(\d+)"/i);
+  if (authMatch) return authMatch[1];
+  return null;
+}
+
+/**
+ * COPC 파일의 WKT VLR에서 좌표계·단위를 자동 감지합니다.
+ * proj4js가 WKT2를 파싱하지 못하는 경우 EPSG 코드로 epsg.io에서 정의를 가져옵니다.
+ *
+ * @param {string|undefined} wkt  Copc.create() 가 반환한 wkt 문자열
+ * @param {string}           url  데이터 URL (proj4 키로 사용)
+ * @returns {Promise<{ proj, projDef, zFactor, xyFactor } | null>}
+ */
+async function detectCrsFromWkt(wkt, url) {
+  if (!wkt) return null;
+  const trimmed = wkt.trim();
+  const upper   = trimmed.toUpperCase();
+
+  // ── COMPD_CS 언래핑: 내부 PROJCS/GEOGCS 블록만 추출 ────────────────────
+  // proj4js 는 COMPD_CS 래퍼를 인식하지 못하므로 수평 CRS 만 꺼냄
+  const crsWkt = _extractInnerCrs(trimmed);
+  const crsUpper = crsWkt.toUpperCase();
+
+  // ── 지리좌표계 (WKT1: GEOGCS, WKT2: GEOGCRS / GEOGRAPHICCRS / GEODCRS) ──
+  // XY 는 이미 lon/lat(도) → proj 변환 불필요, Z 는 미터
+  if (/^GEOG(?:CS|CRS)\b/.test(crsUpper) || /^GEOGRAPHICCRS\b/.test(crsUpper) || /^GEODCRS\b/.test(crsUpper)) {
+    return { proj: 'EPSG:4326', projDef: null, zFactor: 1.0, xyFactor: 111320 };
+  }
+
+  // ── 선형 단위 계수 추출 (전체 WKT 기준, COMPD_CS 포함) ──────────────────
+  const zFactor = _extractLinearUnit(trimmed);
+
+  // ── proj4 키 (URL 기반, 특수문자 치환) ──────────────────────────────────
+  const proj = `CRS:${url.replace(/\W+/g, '_')}`;
+
+  // ── 1단계: 추출된 PROJCS WKT 로 proj4 등록 시도 (WKT1 PROJCS 는 대부분 성공) ──
+  try {
+    proj4.defs(proj, crsWkt);
+    // 실제 변환이 작동하는지 확인 (WKT2 는 등록은 되지만 "Could not get projection name" 발생)
+    proj4(proj, 'EPSG:4326', [0, 0]);
+    return { proj, projDef: crsWkt, zFactor, xyFactor: zFactor };
+  } catch (_) {
+    // WKT2 또는 지원되지 않는 형식 → 2단계로
+  }
+
+  // ── 2단계: EPSG 코드 추출 → epsg.io에서 proj4 정의 가져오기 ─────────────
+  const epsgCode = _extractEpsgCode(trimmed);
+  if (epsgCode) {
+    try {
+      const res = await fetch(`https://epsg.io/${epsgCode}.proj4`);
+      if (res.ok) {
+        const proj4Def = (await res.text()).trim();
+        if (proj4Def) {
+          proj4.defs(proj, proj4Def);
+          console.debug(`[CopcDataSource] EPSG:${epsgCode} proj4 정의 로드 완료`);
+          return { proj, projDef: proj4Def, zFactor, xyFactor: zFactor };
+        }
+      }
+    } catch (fetchErr) {
+      console.warn(`[CopcDataSource] epsg.io EPSG:${epsgCode} 정의 가져오기 실패:`, fetchErr.message);
+    }
+  }
+
+  console.warn('[CopcDataSource] WKT CRS 자동 감지 실패 — 기본값(EPSG:4326) 사용');
+  return null;
+}
+
+/**
  * CopcDataSource
  *
  * COPC(.copc.laz) 파일을 CesiumJS Viewer에 스트리밍 방식으로 가시화하는 클래스.
@@ -112,7 +235,36 @@ export class CopcDataSource {
     // A-2: 초기화 실패 시 이미 생성된 리소스를 정리한다.
     try {
       this._url  = url;
-      this._copc = await Copc.create(url);
+      try {
+        this._copc = await Copc.create(url);
+      } catch (err) {
+        // 헤더 파싱 실패는 대부분 URL 접근 불가(403/404) 또는 비-COPC 파일이다.
+        if (/must be at least|Invalid header|COPC info VLR/i.test(err.message)) {
+          throw new Error(
+            `COPC 헤더를 읽을 수 없습니다. URL이 올바른지 또는 CORS 접근이 허용된지 확인하세요.\n` +
+            `원인: ${err.message}`
+          );
+        }
+        throw err;
+      }
+
+      // WKT VLR 에서 좌표계·단위 자동 감지 (사용자가 projDef 를 직접 지정한 경우 스킵)
+      if (!this._opts.projDef) {
+        const detected = await detectCrsFromWkt(this._copc.wkt, url);
+        if (detected) {
+          this._opts.proj     = detected.proj;
+          this._opts.projDef  = detected.projDef;
+          this._opts.zFactor  = detected.zFactor;
+          this._opts.xyFactor = detected.xyFactor;
+          if (detected.projDef && detected.proj !== 'EPSG:4326') {
+            proj4.defs(detected.proj, detected.projDef);
+          }
+          console.debug(
+            `[CopcDataSource] WKT CRS 자동 감지: proj=${detected.proj}, ` +
+            `zFactor=${detected.zFactor}, xyFactor=${detected.xyFactor}`
+          );
+        }
+      }
 
       const [minx, miny, minz, maxx, maxy, maxz] = this._copc.info.cube;
       this._rootCenter   = { x: (minx + maxx) / 2, y: (miny + maxy) / 2, z: (minz + maxz) / 2 };
@@ -151,6 +303,8 @@ export class CopcDataSource {
     return getNodeBoundingSphere(
       key, this._rootCenter, this._rootHalfSize,
       this._opts.proj, this._opts.geoidOffset,
+      this._opts.zFactor  ?? 0.3048,
+      this._opts.xyFactor ?? (this._opts.zFactor ?? 0.3048),
     );
   }
 
@@ -339,6 +493,7 @@ export class CopcDataSource {
           this._url, this._copc, this._nodes[key], this._pool,
           this._opts.proj, this._opts.projDef,
           this._opts.geoidOffset, this._opts.pixelSize,
+          this._opts.zFactor ?? 0.3048,
         );
 
         // 로드 완료 후에도 세대 확인: 네트워크/파싱 중 카메라가 움직였으면 파기

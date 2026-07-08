@@ -186,7 +186,7 @@ void main() {
  * @param {number}     geoidOffset
  * @param {number}     [pixelSize=2]
  */
-export async function loadNode(url, copc, nodeInfo, pool, srcProj, projDef, geoidOffset, pixelSize = 2) {
+export async function loadNode(url, copc, nodeInfo, pool, srcProj, projDef, geoidOffset, pixelSize = 2, zFactor = 0.3048) {
   // ── 1. fetch + LAZ 파싱 ───────────────────────────────────
   const view = await Copc.loadPointDataView(url, copc, nodeInfo);
   const n    = view.pointCount;
@@ -226,7 +226,7 @@ export async function loadNode(url, copc, nodeInfo, pool, srcProj, projDef, geoi
 
   // ── 2. Worker: proj4 변환 + WGS84 Cartesian3 계산 ────────
   const { positions, colors, pointCount } = await pool.run(
-    { xs, ys, zs, rs, gs, bs, pointCount: n, srcProj, projDef, geoidOffset },
+    { xs, ys, zs, rs, gs, bs, pointCount: n, srcProj, projDef, geoidOffset, zFactor },
     [xs.buffer, ys.buffer, zs.buffer, rs.buffer, gs.buffer, bs.buffer],
   );
 
