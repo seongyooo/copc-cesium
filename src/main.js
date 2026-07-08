@@ -51,6 +51,7 @@ const classToggleBtn    = document.getElementById('classToggleBtn');
 const allClassCheck     = document.getElementById('allClassCheck');
 const classCheckboxes   = document.getElementById('classCheckboxes');
 const presetBtns        = document.querySelectorAll('.preset-btn');
+const heightOffsetInput = document.getElementById('heightOffsetInput');
 
 // ── 현재 로드된 데이터소스 ─────────────────────────────────
 let currentDs        = null;
@@ -77,6 +78,12 @@ pixelSizeSlider.addEventListener('input', () => {
   const v = parseFloat(pixelSizeSlider.value);
   pixelSizeVal.textContent = v;
   if (currentDs) currentDs.pixelSize = v;
+});
+
+// ── 고도 보정 입력 ─────────────────────────────────────────
+heightOffsetInput.addEventListener('input', () => {
+  const v = parseFloat(heightOffsetInput.value) || 0;
+  if (currentDs) currentDs.heightOffset = v;
 });
 
 // ── 분류 필터 ──────────────────────────────────────────────
@@ -184,6 +191,7 @@ async function loadCopc(url, opts = {}) {
   classCheckboxes.innerHTML = '';
   allClassCheck.checked = true;
   _renderedClasses = new Set();
+  heightOffsetInput.value = '0';
 
   loadBtn.disabled = true;
   statusEl.innerHTML = '📡 COPC 파일 초기화 중...';

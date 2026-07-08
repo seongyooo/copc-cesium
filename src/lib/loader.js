@@ -22,17 +22,21 @@ class PointCloudPrimitive {
    * @param {Cesium.BoundingSphere} boundingSphere
    * @param {{ value: number }} pixelSizeRef  공유 점 크기 ref
    * @param {{ value: number }} classMaskRef  공유 분류 마스크 ref (비트 N = 클래스 N 표시)
+   * @param {{ value: Cesium.Cartesian3 }} upVecRef      공유 상향 벡터 ref
+   * @param {{ value: number }} heightOffsetRef 공유 고도 오프셋 ref (m)
    */
-  constructor(posHigh, posLow, colU8, cls, pointCount, boundingSphere, pixelSizeRef, classMaskRef) {
-    this._posHigh        = posHigh;
-    this._posLow         = posLow;
-    this._colU8          = colU8;
-    this._cls            = cls;
-    this._pointCount     = pointCount;
-    this._boundingSphere = boundingSphere;
-    this._pixelSizeRef   = pixelSizeRef;
-    this._classMaskRef   = classMaskRef;
-    this.show            = true;
+  constructor(posHigh, posLow, colU8, cls, pointCount, boundingSphere, pixelSizeRef, classMaskRef, upVecRef, heightOffsetRef) {
+    this._posHigh         = posHigh;
+    this._posLow          = posLow;
+    this._colU8           = colU8;
+    this._cls             = cls;
+    this._pointCount      = pointCount;
+    this._boundingSphere  = boundingSphere;
+    this._pixelSizeRef    = pixelSizeRef;
+    this._classMaskRef    = classMaskRef;
+    this._upVecRef        = upVecRef;
+    this._heightOffsetRef = heightOffsetRef;
+    this.show             = true;
     this._destroyed      = false;
     this._cmd            = null;    // 지연 생성
     this._va             = null;
@@ -114,13 +118,16 @@ in vec3 position3DLow;
 in vec4 color;
 in float classification;
 uniform float u_pixelSize;
+uniform vec3 u_upVec;
+uniform float u_heightOffset;
 out vec4 v_color;
 flat out float v_cls;
 void main() {
   v_color = color;
   v_cls = classification;
   gl_PointSize = u_pixelSize;
-  vec4 p = czm_translateRelativeToEye(position3DHigh, position3DLow);
+  vec3 adjHigh = position3DHigh + u_upVec * u_heightOffset;
+  vec4 p = czm_translateRelativeToEye(adjHigh, position3DLow);
   gl_Position = czm_modelViewProjectionRelativeToEye * p;
 }`;
 
@@ -136,8 +143,10 @@ void main() {
 }`;
 
     // uniformMap 클로저: ref 객체를 캡처하여 매 프레임 최신값 반환
-    const pixelSizeRef = this._pixelSizeRef;
-    const classMaskRef = this._classMaskRef;
+    const pixelSizeRef    = this._pixelSizeRef;
+    const classMaskRef    = this._classMaskRef;
+    const upVecRef        = this._upVecRef;
+    const heightOffsetRef = this._heightOffsetRef;
 
     const sp = Cesium.ShaderProgram.fromCache({
       context,
@@ -167,8 +176,10 @@ void main() {
       pass:           Cesium.Pass.OPAQUE,
       modelMatrix:    Cesium.Matrix4.IDENTITY,
       uniformMap: {
-        u_pixelSize: () => pixelSizeRef.value,
-        u_classMask: () => classMaskRef.value,
+        u_pixelSize:    () => pixelSizeRef.value,
+        u_classMask:    () => classMaskRef.value,
+        u_upVec:        () => upVecRef ? upVecRef.value : new Cesium.Cartesian3(0, 0, 1),
+        u_heightOffset: () => heightOffsetRef ? heightOffsetRef.value : 0,
       },
     });
 
@@ -205,9 +216,11 @@ void main() {
  * @param {{ value: number }} pixelSizeRef  공유 점 크기 ref
  * @param {{ value: number }} classMaskRef  공유 분류 마스크 ref
  * @param {number}     [zFactor=0.3048]
+ * @param {{ value: Cesium.Cartesian3 }} [upVecRef=null]      공유 상향 벡터 ref
+ * @param {{ value: number }}            [heightOffsetRef=null] 공유 고도 오프셋 ref
  * @returns {{ collection, pointCount, lastUsed, seenClasses }}
  */
-export async function loadNode(url, copc, nodeInfo, pool, srcProj, projDef, geoidOffset, pixelSizeRef, classMaskRef, zFactor = 0.3048) {
+export async function loadNode(url, copc, nodeInfo, pool, srcProj, projDef, geoidOffset, pixelSizeRef, classMaskRef, zFactor = 0.3048, upVecRef = null, heightOffsetRef = null) {
   // ── 1. fetch + LAZ 파싱 ───────────────────────────────────
   const view = await Copc.loadPointDataView(url, copc, nodeInfo);
   const n    = view.pointCount;
@@ -298,7 +311,7 @@ export async function loadNode(url, copc, nodeInfo, pool, srcProj, projDef, geoi
 
   // ── 6. PointCloudPrimitive 생성 ──────────────────────────
   const primitive = new PointCloudPrimitive(
-    posHigh, posLow, colU8, clsU8, pointCount, boundingSphere, pixelSizeRef, classMaskRef,
+    posHigh, posLow, colU8, clsU8, pointCount, boundingSphere, pixelSizeRef, classMaskRef, upVecRef, heightOffsetRef,
   );
 
   return { collection: primitive, pointCount, lastUsed: Date.now(), seenClasses };

@@ -56,21 +56,6 @@
       line-height: 1.8;
     }
 
-    /* ── 우측 하단 컨트롤 ───────────────────────────────────── */
-    #controls {
-      position: fixed; bottom: 20px; right: 14px;
-      display: flex; flex-direction: column; gap: 8px;
-      z-index: 999;
-    }
-    .ctrl-btn {
-      padding: 7px 14px; border-radius: 5px;
-      background: rgba(15, 17, 22, 0.85); color: #ccc;
-      border: 1px solid #444; font-size: 13px;
-      cursor: pointer; text-align: center;
-      backdrop-filter: blur(4px);
-    }
-    .ctrl-btn:hover { background: rgba(40, 44, 60, 0.95); color: #fff; }
-
     #layerSelect {
       padding: 4px 8px; border-radius: 4px;
       background: #1a1d24; color: #eee;
@@ -84,18 +69,50 @@
     }
     #pixelSizeVal { color: #4a9eff; }
 
-    /* ── 분류 필터 패널 ────────────────────────────────────── */
-    #classPanel {
-      position: fixed; top: 54px; left: 290px;
-      background: rgba(0,0,0,0.75); color: #fff;
-      padding: 10px 14px; border-radius: 6px;
+    /* ── 분류 필터 사이드 패널 ─────────────────────────────── */
+    #classSidebar {
+      position: fixed; top: 0; left: 0; bottom: 0;
+      width: 200px;
+      background: rgba(15, 17, 22, 0.92);
+      backdrop-filter: blur(6px);
+      color: #fff;
       font-family: monospace; font-size: 12px;
-      min-width: 160px; z-index: 999;
-      line-height: 1.8;
+      z-index: 1001;
+      display: flex; flex-direction: column;
+      transform: translateX(-200px);
+      transition: transform 0.25s ease;
+      padding-top: 54px; /* 툴바 높이만큼 */
     }
-    #classPanel b { font-size: 13px; display: block; margin-bottom: 4px; }
+    #classSidebar.open { transform: translateX(0); }
+
+    #classSidebarInner {
+      padding: 12px 14px;
+      overflow-y: auto;
+      flex: 1;
+      line-height: 1.9;
+    }
+    #classSidebar b { font-size: 13px; display: block; margin-bottom: 6px; color: #eee; }
     .cls-row { display: flex; align-items: center; gap: 6px; }
     .cls-row input { cursor: pointer; accent-color: #4a9eff; margin: 0; }
+    .cls-row label { cursor: pointer; color: #ccc; }
+
+    /* 토글 탭 — 사이드바 오른쪽 끝에 붙어있는 버튼 */
+    #classToggleBtn {
+      position: fixed; top: 50%; left: 0;
+      transform: translateY(-50%);
+      width: 22px; height: 60px;
+      background: rgba(15, 17, 22, 0.88);
+      border: 1px solid #444; border-left: none;
+      border-radius: 0 6px 6px 0;
+      color: #ccc; font-size: 11px;
+      cursor: pointer; z-index: 1002;
+      display: flex; align-items: center; justify-content: center;
+      writing-mode: vertical-rl;
+      transition: left 0.25s ease, background 0.15s;
+      user-select: none;
+    }
+    #classToggleBtn:hover { background: rgba(40, 44, 60, 0.95); color: #fff; }
+    #classToggleBtn.open { left: 200px; }
 
     /* ── 모바일 반응형 ─────────────────────────────────────── */
     @media (max-width: 600px) {
@@ -104,7 +121,6 @@
 
       #urlInput { min-width: 0; font-size: 12px; }
       #loadBtn, .preset-btn { padding: 8px 10px; font-size: 12px; min-height: 36px; }
-
       #pixelSizeSlider { width: 70px; }
 
       /* 상태 패널: 하단 고정 */
@@ -118,15 +134,10 @@
         line-height: 1.6;
       }
 
-      /* 분류 필터 패널: 상태 패널 위에 */
-      #classPanel {
-        top: auto; bottom: 52px;
-        left: 0; right: auto;
-        border-radius: 6px 6px 0 0;
-        min-width: 0;
-        max-height: 35vh;
-        overflow-y: auto;
-      }
+      /* 사이드바: 모바일에서는 더 좁게 */
+      #classSidebar { width: 170px; transform: translateX(-170px); }
+      #classSidebar.open { transform: translateX(0); }
+      #classToggleBtn.open { left: 170px; }
     }
   </style>
 </head>
@@ -153,21 +164,33 @@
     <div class="sep"></div>
     <label>점 크기 <span id="pixelSizeVal">2</span>px</label>
     <input id="pixelSizeSlider" type="range" min="1" max="8" step="0.5" value="2">
+    <div class="sep"></div>
+    <label>고도 보정</label>
+    <input id="heightOffsetInput" type="number" value="0" step="1"
+           style="width:64px; padding:4px 6px; border-radius:4px;
+                  background:#1a1d24; color:#eee; border:1px solid #444;
+                  font-size:12px; font-family:monospace; text-align:right;">
+    <label>m</label>
   </div>
 
   <!-- 상태 패널 -->
   <div id="status">초기화 중...</div>
 
-  <!-- 분류 필터 패널 (데이터 로드 후 표시) -->
-  <div id="classPanel" style="display:none">
-    <b>분류 필터</b>
-    <div class="cls-row">
-      <input type="checkbox" id="allClassCheck" checked>
-      <label for="allClassCheck">전체 선택/해제</label>
+  <!-- 분류 필터 사이드바 -->
+  <div id="classSidebar">
+    <div id="classSidebarInner">
+      <b>분류 필터</b>
+      <div class="cls-row">
+        <input type="checkbox" id="allClassCheck" checked>
+        <label for="allClassCheck">전체 선택/해제</label>
+      </div>
+      <hr style="border-color:#444; margin:6px 0">
+      <div id="classCheckboxes"></div>
     </div>
-    <hr style="border-color:#444; margin:5px 0">
-    <div id="classCheckboxes"></div>
   </div>
+
+  <!-- 분류 필터 토글 탭 -->
+  <button id="classToggleBtn" title="분류 필터">필터</button>
 
   <!-- fetch 패치: Range 요청에만 cache:'no-store' 적용 (ERR_CACHE_OPERATION_NOT_SUPPORTED 우회).
        일반 fetch(지형, 이미지 등)는 그대로 두어 불필요한 캐시 우회를 최소화한다. -->

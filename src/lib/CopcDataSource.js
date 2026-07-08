@@ -207,6 +207,8 @@ export class CopcDataSource {
     this._pixelSizeRef = { value: this._opts.pixelSize };
     this._classMaskRef = { value: -1 }; // -1 = 전체 표시 (모든 비트 1)
     this._seenClasses  = new Set();     // 로드된 노드에서 발견된 분류값 집합
+    this._upVecRef        = { value: new Cesium.Cartesian3(0, 0, 1) };
+    this._heightOffsetRef = { value: 0 };
 
     this._onProgress    = null;
     this._destroyed     = false; // A-3: 이중 호출·재진입 방지
@@ -274,14 +276,27 @@ export class CopcDataSource {
       this._nodes    = nodes;
       this._maxDepth = Math.max(...Object.keys(nodes).map(getDepth));
 
+      // 고도 자동 보정 (지형 샘플링 → geoidOffset 설정)
+      await this._autoDetectGeoidOffset();
+
       // 데이터 중심으로 카메라 이동
       const rootSphere = this._sphere('0-0-0-0');
+
+      // upVec: rootSphere 중심 방향의 단위 벡터 (지역 상향)
+      Cesium.Cartesian3.normalize(rootSphere.center, this._upVecRef.value);
+
+      // SSE threshold의 2배 거리 → 첫 프레임부터 depth 깊게 시작
+      const canvas   = this._viewer.scene.canvas;
+      const fovY     = this._viewer.camera.frustum.fovy ?? (Math.PI / 3);
+      const sseScale = canvas.clientHeight / (2 * Math.tan(fovY / 2));
+      const initRange = rootSphere.radius * sseScale / (this._opts.sseThreshold * 2);
+
       await new Promise(resolve => {
         this._viewer.camera.flyToBoundingSphere(rootSphere, {
           offset: new Cesium.HeadingPitchRange(
             Cesium.Math.toRadians(0),
             Cesium.Math.toRadians(-45),
-            rootSphere.radius * 4,
+            initRange,
           ),
           complete: resolve,
         });
@@ -298,6 +313,40 @@ export class CopcDataSource {
   }
 
   // ── 내부 유틸 ───────────────────────────────────────────────
+
+  async _autoDetectGeoidOffset() {
+    try {
+      const [minx, miny, minz, maxx, maxy] = this._copc.info.cube;
+      const cx = (minx + maxx) / 2;
+      const cy = (miny + maxy) / 2;
+
+      let lon, lat;
+      if (this._opts.proj === 'EPSG:4326' || !this._opts.projDef) {
+        lon = cx; lat = cy;
+      } else {
+        [lon, lat] = proj4(this._opts.proj, 'EPSG:4326', [cx, cy]);
+      }
+
+      const carto = Cesium.Cartographic.fromDegrees(lon, lat);
+      const [sampled] = await Cesium.sampleTerrainMostDetailed(
+        this._viewer.terrainProvider, [carto],
+      );
+      const terrainH = sampled?.height ?? 0;
+
+      const zFactor = this._opts.zFactor ?? 1.0;
+      const groundZ = minz * zFactor; // 포인트 클라우드 최저점(미터)
+
+      const offset = terrainH - groundZ;
+      if (Math.abs(offset) < 2000) {
+        this._opts.geoidOffset = offset;
+        console.debug(`[CopcDataSource] 고도 자동 보정: ${offset.toFixed(1)}m`);
+      } else {
+        console.warn(`[CopcDataSource] 고도 자동 보정 범위 초과(${offset.toFixed(1)}m), 스킵`);
+      }
+    } catch (e) {
+      console.warn('[CopcDataSource] 고도 자동 보정 실패:', e.message);
+    }
+  }
 
   _sphere(key) {
     return getNodeBoundingSphere(
@@ -494,6 +543,7 @@ export class CopcDataSource {
           this._opts.proj, this._opts.projDef,
           this._opts.geoidOffset, this._pixelSizeRef, this._classMaskRef,
           this._opts.zFactor ?? 0.3048,
+          this._upVecRef, this._heightOffsetRef,
         );
 
         // 로드 완료 후 세대 확인 — gen 불일치 시 씬에 추가하지 않되 캐시에 보관.
@@ -636,6 +686,10 @@ export class CopcDataSource {
   /** 점 크기 px — 즉시 반영 (재로드 불필요) */
   set pixelSize(v)   { this._pixelSizeRef.value = v; }
   get pixelSize()    { return this._pixelSizeRef.value; }
+
+  /** 고도 보정 오프셋 m — 셰이더 즉시 반영 */
+  set heightOffset(v) { this._heightOffsetRef.value = v; }
+  get heightOffset()  { return this._heightOffsetRef.value; }
 
   /**
    * 분류 필터 마스크 설정 — 즉시 반영.
