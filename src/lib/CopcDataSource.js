@@ -149,7 +149,6 @@ export class CopcDataSource {
    * @param {string}  options.projDef       proj4 정의 문자열 (proj ≠ EPSG:4326 일 때 필수)
    * @param {number}  options.geoidOffset   지오이드 보정값 m (기본: 0)
    * @param {number}  options.concurrency   동시 노드 로드 수 / Worker 풀 크기 (기본: 5)
-   * @param {number}  options.debounceMs    카메라 정지 후 LoD 갱신 대기 ms (기본: 300)
    * @param {number}  options.maxCacheNodes LRU 캐시 최대 노드 수 (기본: 80)
    * @param {number}  options.pixelSize     점 크기 px (기본: 2)
    * @param {number}  options.maxVisibleNodes BFS가 한 번에 선택하는 최대 렌더링 노드 수 (기본: 100).
@@ -166,7 +165,6 @@ export class CopcDataSource {
       projDef:        null,
       geoidOffset:    0,
       concurrency:    5,
-      debounceMs:     300,
       maxCacheNodes:   150,  // B-5: maxVisibleNodes(100)보다 크게 유지해야 eviction 동작
       maxVisibleNodes: 100,
       pixelSize:       2,
@@ -199,7 +197,6 @@ export class CopcDataSource {
     this._lastTargetSet = new Set();
     this._isUpdating   = false;
     this._pendingUpdate = false;
-    this._debounceTimer = null;
     this._removeCameraListener = null;
     // 카메라가 움직일 때마다 증가. loadNode 완료 후 이 값이 바뀌었으면
     // 결과를 버려 구형 시점의 노드가 씬에 추가되는 것을 막는다.
@@ -520,33 +517,43 @@ export class CopcDataSource {
           loading: toLoad.length - loadedCount, cached: this._cache.size, height });
       }));
 
-      // 5. 비대상 노드를 씬에서 제거 (show=false 대신 primitives.remove).
-      //    collection 객체는 캐시에 유지되므로 재진입 시 primitives.add만 하면 된다.
-      //    씬에서 제거하면 Cesium 업데이트 루프 대상에서 빠져 프레임 부하가 줄어든다.
-      for (const [key, data] of this._cache) {
-        if (!targetSet.has(key) && this._inScene.has(key)) {
-          this._container.remove(data.collection);
-          this._inScene.delete(key);
+      // 5‒7. gen 불일치(로드 중 카메라 이동) 시 씬 정리를 건너뜀.
+      //       새 노드가 씬에 추가되지 않은 상태에서 기존 노드를 제거하면
+      //       다음 _updateLoD가 완료될 때까지 빈 화면이 나타나기 때문.
+      //       cleanup 및 최종 emit은 다음 _updateLoD(_pendingUpdate)가 담당.
+      if (gen === this._loadGen) {
+        // 5. 비대상 노드를 씬에서 제거 (show=false 대신 primitives.remove).
+        //    collection 객체는 캐시에 유지되므로 재진입 시 primitives.add만 하면 된다.
+        //    씬에서 제거하면 Cesium 업데이트 루프 대상에서 빠져 프레임 부하가 줄어든다.
+        for (const [key, data] of this._cache) {
+          if (!targetSet.has(key) && this._inScene.has(key)) {
+            this._container.remove(data.collection);
+            this._inScene.delete(key);
+          }
         }
+
+        // 6. LRU eviction
+        this._evict(targetSet);
+
+        // 7. targetSet 최종 프러스텀 동기화
+        //    (로드 중 카메라 이동 시 현재 시점 기준으로 재확인)
+        const cv2 = getCullingVolume(camera);
+        for (const key of targetSet) {
+          const data = this._cache.get(key);
+          if (data) data.collection.show = isInFrustum(getSphere(key), cv2);
+        }
+
+        const visiblePoints = [...targetSet]
+          .filter(k => this._cache.has(k))
+          .reduce((s, k) => s + this._cache.get(k).pointCount, 0);
+
+        this._emit({ depth: maxDepth, visible: visibleKeys.length, culled,
+          loading: 0, points: visiblePoints, cached: this._cache.size, height });
+      } else {
+        // gen 불일치: 씬에 있는 노드는 건드리지 않고 캐시 초과분만 정리.
+        // keepSet = 현재 씬에 있는 노드 → 보이는 노드는 evict 대상에서 제외.
+        this._evict(this._inScene);
       }
-
-      // 6. LRU eviction
-      this._evict(targetSet);
-
-      // 7. targetSet 최종 프러스텀 동기화
-      //    (로드 중 카메라 이동 시 현재 시점 기준으로 재확인)
-      const cv2 = getCullingVolume(camera);
-      for (const key of targetSet) {
-        const data = this._cache.get(key);
-        if (data) data.collection.show = isInFrustum(getSphere(key), cv2);
-      }
-
-      const visiblePoints = [...targetSet]
-        .filter(k => this._cache.has(k))
-        .reduce((s, k) => s + this._cache.get(k).pointCount, 0);
-
-      this._emit({ depth: maxDepth, visible: visibleKeys.length, culled,
-        loading: 0, points: visiblePoints, cached: this._cache.size, height });
 
     } finally {
       this._isUpdating = false;
@@ -606,8 +613,7 @@ export class CopcDataSource {
       prevHeight = h;
 
       if (!this._isUpdating) this._updateVisibility();
-      clearTimeout(this._debounceTimer);
-      this._debounceTimer = setTimeout(() => this._updateLoD(), this._opts.debounceMs);
+      this._updateLoD();
     };
     this._removeCameraListener = this._viewer.camera.changed.addEventListener(handler);
 
@@ -657,7 +663,6 @@ export class CopcDataSource {
   /** 모든 리소스를 해제하고 Viewer에서 제거합니다. */
   destroy() {
     this._destroyed = true; // A-3: 이후 _updateLoD 재진입 차단
-    clearTimeout(this._debounceTimer);
     if (this._removeCameraListener)  this._removeCameraListener();
     if (this._removeMoveEndListener) this._removeMoveEndListener();
     this._pool.destroy();
