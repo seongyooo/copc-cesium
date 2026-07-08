@@ -114,7 +114,7 @@ const EPSG_TABLE = {
   // Connecticut
   32118: '+proj=lcc +lat_1=41.86666666666667 +lat_2=41.2 +lat_0=40.83333333333334 +lon_0=-72.75 +x_0=304800.6096 +y_0=152400.3048 +datum=NAD83 +units=m +no_defs',
   // Delaware
-  32110: '+proj=tmerc +lat_0=38 +lon_0=-75.41666666666667 +k=0.999995 +x_0=200000 +y_0=0 +datum=NAD83 +units=m +no_defs',
+  32112: '+proj=tmerc +lat_0=38 +lon_0=-75.41666666666667 +k=0.999995 +x_0=200000 +y_0=0 +datum=NAD83 +units=m +no_defs',
   // Georgia
   26966: '+proj=tmerc +lat_0=30 +lon_0=-82.16666666666667 +k=0.9999 +x_0=200000 +y_0=0 +datum=NAD83 +units=m +no_defs',
   26967: '+proj=tmerc +lat_0=30 +lon_0=-84.16666666666667 +k=0.9999 +x_0=700000 +y_0=0 +datum=NAD83 +units=m +no_defs',
@@ -334,8 +334,8 @@ for (let z = 1; z <= 60; z++) {
 for (let z = 28; z <= 38; z++) {
   EPSG_TABLE[25800 + z] = `+proj=utm +zone=${z} +ellps=GRS80 +units=m +no_defs`;
 }
-// NAD83 UTM North 전 구역 (EPSG:26901–26923 → 26960까지 확장)
-for (let z = 1; z <= 60; z++) {
+// NAD83 UTM North (EPSG:26901–26923, 북미 커버 구역만)
+for (let z = 1; z <= 23; z++) {
   if (!EPSG_TABLE[26900 + z]) {
     EPSG_TABLE[26900 + z] = `+proj=utm +zone=${z} +ellps=GRS80 +datum=NAD83 +units=m +no_defs`;
   }
