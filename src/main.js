@@ -58,6 +58,34 @@ const presetBtns        = document.querySelectorAll('.preset-btn');
 const heightOffsetInput = document.getElementById('heightOffsetInput');
 const sseSlider         = document.getElementById('sseSlider');
 const sseVal            = document.getElementById('sseVal');
+const settingBtns       = document.querySelectorAll('.setting-btn');
+const settingPanels     = document.querySelectorAll('.setting-panel');
+
+// ── 설정 패널 토글 ─────────────────────────────────────────
+settingBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    const targetId = btn.dataset.panel;
+    const isOpen   = btn.classList.contains('active');
+
+    // 모두 닫기
+    settingBtns.forEach(b  => b.classList.remove('active'));
+    settingPanels.forEach(p => p.classList.remove('open'));
+
+    // 같은 버튼이면 토글 (닫기), 다른 버튼이면 열기
+    if (!isOpen) {
+      btn.classList.add('active');
+      document.getElementById(targetId).classList.add('open');
+    }
+  });
+});
+
+// 패널 외부 클릭 시 닫기
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.setting-panel') && !e.target.closest('.setting-btn')) {
+    settingBtns.forEach(b  => b.classList.remove('active'));
+    settingPanels.forEach(p => p.classList.remove('open'));
+  }
+});
 
 // ── 현재 로드된 데이터소스 ─────────────────────────────────
 let currentDs        = null;

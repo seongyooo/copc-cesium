@@ -114,6 +114,45 @@
     #classToggleBtn:hover { background: rgba(40, 44, 60, 0.95); color: #fff; }
     #classToggleBtn.open { left: 200px; }
 
+    /* ── 설정 패널 버튼 ─────────────────────────────────────── */
+    .setting-btn {
+      padding: 5px 10px; border-radius: 4px;
+      background: #2a2d38; color: #ccc; border: 1px solid #444;
+      font-size: 13px; cursor: pointer; white-space: nowrap;
+      user-select: none;
+    }
+    .setting-btn:hover { background: #3a3e50; color: #fff; }
+    .setting-btn.active { background: #2a5099; color: #fff; border-color: #4a9eff; }
+
+    /* ── 설정 플로팅 패널 ─────────────────────────────────── */
+    .setting-panel {
+      display: none;
+      position: fixed; top: 50px; right: 12px;
+      background: rgba(15, 17, 22, 0.94);
+      backdrop-filter: blur(6px);
+      border: 1px solid #444; border-radius: 6px;
+      padding: 12px 16px;
+      z-index: 1010;
+      min-width: 180px;
+      color: #ccc; font-family: monospace; font-size: 12px;
+      line-height: 2;
+    }
+    .setting-panel.open { display: block; }
+    .setting-panel label { display: block; color: #aaa; margin-bottom: 2px; }
+    .setting-panel select,
+    .setting-panel input[type="number"] {
+      width: 100%;
+      padding: 4px 8px; border-radius: 4px;
+      background: #1a1d24; color: #eee;
+      border: 1px solid #444; font-size: 12px; font-family: monospace;
+      box-sizing: border-box;
+    }
+    .setting-panel select:focus,
+    .setting-panel input[type="number"]:focus { border-color: #4a9eff; outline: none; }
+    .panel-row { display: flex; align-items: center; gap: 8px; }
+    .panel-row input[type="range"] { flex: 1; cursor: pointer; accent-color: #4a9eff; }
+    .panel-val { color: #4a9eff; min-width: 28px; text-align: right; }
+
     /* ── 모바일 반응형 ─────────────────────────────────────── */
     @media (max-width: 600px) {
       #toolbar { gap: 6px; padding: 6px 8px; }
@@ -138,6 +177,9 @@
       #classSidebar { width: 170px; transform: translateX(-170px); }
       #classSidebar.open { transform: translateX(0); }
       #classToggleBtn.open { left: 170px; }
+
+      /* 설정 패널: 모바일에서 full-width */
+      .setting-panel { left: 8px; right: 8px; min-width: 0; }
     }
   </style>
 </head>
@@ -156,26 +198,38 @@
     <button class="preset-btn" data-preset="trestle">Trestle Bridge</button>
     <button class="preset-btn" data-preset="sandiego">San Diego 2005</button>
     <div class="sep"></div>
-    <label>지도</label>
+    <button class="setting-btn" data-panel="panelMap">🗺 지도</button>
+    <button class="setting-btn" data-panel="panelRender">⚙ 렌더링</button>
+    <button class="setting-btn" data-panel="panelHeight">↕ 고도</button>
+  </div>
+
+  <!-- 지도 설정 패널 -->
+  <div id="panelMap" class="setting-panel">
+    <label>지도 레이어</label>
     <select id="layerSelect">
       <option value="satellite">위성</option>
       <option value="osm">도로(OSM)</option>
       <option value="none">없음</option>
     </select>
-    <div class="sep"></div>
+  </div>
+
+  <!-- 렌더링 설정 패널 -->
+  <div id="panelRender" class="setting-panel">
     <label>점 크기 <span id="pixelSizeVal">2</span>px</label>
-    <input id="pixelSizeSlider" type="range" min="1" max="8" step="0.5" value="2">
-    <div class="sep"></div>
-    <label>세밀도 <span id="sseVal">250</span>px</label>
-    <input id="sseSlider" type="range" min="50" max="800" step="50" value="250"
-           style="width:90px; cursor:pointer; vertical-align:middle; accent-color:#4a9eff;">
-    <div class="sep"></div>
-    <label>고도 보정</label>
+    <div class="panel-row">
+      <input id="pixelSizeSlider" type="range" min="1" max="8" step="0.5" value="2">
+    </div>
+    <label style="margin-top:8px">세밀도 <span id="sseVal">250</span>px</label>
+    <div class="panel-row">
+      <input id="sseSlider" type="range" min="50" max="3000" step="50" value="250">
+    </div>
+  </div>
+
+  <!-- 고도 설정 패널 -->
+  <div id="panelHeight" class="setting-panel">
+    <label>고도 보정 (m)</label>
     <input id="heightOffsetInput" type="number" value="0" step="1"
-           style="width:64px; padding:4px 6px; border-radius:4px;
-                  background:#1a1d24; color:#eee; border:1px solid #444;
-                  font-size:12px; font-family:monospace; text-align:right;">
-    <label>m</label>
+           style="text-align:right;">
   </div>
 
   <!-- 상태 패널 -->
