@@ -23,15 +23,15 @@ const PRESETS = {
     geoidOffset: -20,
   },
   sofi: {
-    label:       'Sofia (Bulgaria)',
-    url:         'https://s3.amazonaws.com/hobu-lidar/sofi.copc.laz',
+    label:       'SoFi Stadium',
+    url:         'https://hobu-lidar.s3.amazonaws.com/sofi.copc.laz',
     proj:        'EPSG:4326',
     projDef:     null,
     geoidOffset: 0,
   },
-  lyon: {
-    label:       'Lyon (France)',
-    url:         'https://s3.amazonaws.com/hobu-lidar/lyon.copc.laz',
+  millsite: {
+    label:       'Millsite (USGS 3DEP)',
+    url:         'https://s3.amazonaws.com/data.entwine.io/millsite.copc.laz',
     proj:        'EPSG:4326',
     projDef:     null,
     geoidOffset: 0,
