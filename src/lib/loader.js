@@ -160,7 +160,7 @@ void main() {
       shaderProgram:  sp,
       renderState:    Cesium.RenderState.fromCache({
         depthTest: { enabled: true },
-        depthMask: false,
+        depthMask: true,
       }),
       boundingVolume: this._boundingSphere,
       count:          this._pointCount,
