@@ -316,30 +316,41 @@ export class CopcDataSource {
 
   async _autoDetectGeoidOffset() {
     try {
-      const [minx, miny, minz, maxx, maxy] = this._copc.info.cube;
+      const [minx, miny, minz, maxx, maxy, maxz] = this._copc.info.cube;
       const cx = (minx + maxx) / 2;
       const cy = (miny + maxy) / 2;
 
-      let lon, lat;
-      if (this._opts.proj === 'EPSG:4326' || !this._opts.projDef) {
-        lon = cx; lat = cy;
-      } else {
-        [lon, lat] = proj4(this._opts.proj, 'EPSG:4326', [cx, cy]);
-      }
+      const toWgs84 = (x, y) => {
+        if (this._opts.proj === 'EPSG:4326' || !this._opts.projDef) return [x, y];
+        return proj4(this._opts.proj, 'EPSG:4326', [x, y]);
+      };
 
-      const carto = Cesium.Cartographic.fromDegrees(lon, lat);
-      const [sampled] = await Cesium.sampleTerrainMostDetailed(
-        this._viewer.terrainProvider, [carto],
+      // 5개 지점(center + 4 midpoints) 지형 샘플 → 최솟값 사용.
+      // 데이터셋 최저 Z(minz)는 지형이 낮은 곳에 있는 경향이 있으므로
+      // 지형 최솟값이 minz 기준점과 가장 잘 대응한다.
+      const pts = [
+        [cx,   cy  ],
+        [cx,   miny],
+        [cx,   maxy],
+        [minx, cy  ],
+        [maxx, cy  ],
+      ].map(([x, y]) => {
+        const [lon, lat] = toWgs84(x, y);
+        return Cesium.Cartographic.fromDegrees(lon, lat);
+      });
+
+      const samples = await Cesium.sampleTerrainMostDetailed(
+        this._viewer.terrainProvider, pts,
       );
-      const terrainH = sampled?.height ?? 0;
+      const minTerrainH = Math.min(...samples.map(s => s.height ?? 0));
 
-      const zFactor = this._opts.zFactor ?? 1.0;
-      const groundZ = minz * zFactor; // 포인트 클라우드 최저점(미터)
+      const zFactor  = this._opts.zFactor ?? 1.0;
+      const groundZ  = minz * zFactor; // cube 최저점(미터, 소스 CRS)
+      const offset   = minTerrainH - groundZ;
 
-      const offset = terrainH - groundZ;
       if (Math.abs(offset) < 2000) {
         this._opts.geoidOffset = offset;
-        console.debug(`[CopcDataSource] 고도 자동 보정: ${offset.toFixed(1)}m`);
+        console.debug(`[CopcDataSource] 고도 자동 보정: ${offset.toFixed(1)}m (지형최저: ${minTerrainH.toFixed(1)}m, 데이터최저: ${groundZ.toFixed(1)}m)`);
       } else {
         console.warn(`[CopcDataSource] 고도 자동 보정 범위 초과(${offset.toFixed(1)}m), 스킵`);
       }
