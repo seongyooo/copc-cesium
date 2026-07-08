@@ -2,6 +2,7 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>COPC × CesiumJS</title>
   <style>
     html, body, #cesiumContainer { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
@@ -95,6 +96,38 @@
     #classPanel b { font-size: 13px; display: block; margin-bottom: 4px; }
     .cls-row { display: flex; align-items: center; gap: 6px; }
     .cls-row input { cursor: pointer; accent-color: #4a9eff; margin: 0; }
+
+    /* ── 모바일 반응형 ─────────────────────────────────────── */
+    @media (max-width: 600px) {
+      #toolbar { gap: 6px; padding: 6px 8px; }
+      .sep { display: none; }
+
+      #urlInput { min-width: 0; font-size: 12px; }
+      #loadBtn, .preset-btn { padding: 8px 10px; font-size: 12px; min-height: 36px; }
+
+      #pixelSizeSlider { width: 70px; }
+
+      /* 상태 패널: 하단 고정 */
+      #status {
+        top: auto; bottom: 0;
+        left: 0; right: 0;
+        border-radius: 0;
+        min-width: 0;
+        font-size: 11px;
+        padding: 6px 10px;
+        line-height: 1.6;
+      }
+
+      /* 분류 필터 패널: 상태 패널 위에 */
+      #classPanel {
+        top: auto; bottom: 52px;
+        left: 0; right: auto;
+        border-radius: 6px 6px 0 0;
+        min-width: 0;
+        max-height: 35vh;
+        overflow-y: auto;
+      }
+    }
   </style>
 </head>
 <body>

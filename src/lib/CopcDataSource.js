@@ -7,6 +7,7 @@ import {
 } from './lod.js';
 import { loadNode } from './loader.js';
 import { WorkerPool } from './WorkerPool.js';
+import { lookupEpsg } from './epsg-defs.js';
 
 /**
  * COMPD_CS["...", PROJCS[...], VERT_CS[...]] 에서 내부 PROJCS/GEOGCS 블록을
@@ -71,7 +72,7 @@ function _extractEpsgCode(wkt) {
 
 /**
  * COPC 파일의 WKT VLR에서 좌표계·단위를 자동 감지합니다.
- * proj4js가 WKT2를 파싱하지 못하는 경우 EPSG 코드로 epsg.io에서 정의를 가져옵니다.
+ * proj4js가 WKT2를 파싱하지 못하는 경우 EPSG 코드로 로컬 테이블에서 정의를 조회합니다.
  *
  * @param {string|undefined} wkt  Copc.create() 가 반환한 wkt 문자열
  * @param {string}           url  데이터 URL (proj4 키로 사용)
@@ -109,22 +110,16 @@ async function detectCrsFromWkt(wkt, url) {
     // WKT2 또는 지원되지 않는 형식 → 2단계로
   }
 
-  // ── 2단계: EPSG 코드 추출 → epsg.io에서 proj4 정의 가져오기 ─────────────
+  // ── 2단계: EPSG 코드 추출 → 로컬 테이블 조회 ────────────────────────────
   const epsgCode = _extractEpsgCode(trimmed);
   if (epsgCode) {
-    try {
-      const res = await fetch(`https://epsg.io/${epsgCode}.proj4`);
-      if (res.ok) {
-        const proj4Def = (await res.text()).trim();
-        if (proj4Def) {
-          proj4.defs(proj, proj4Def);
-          console.debug(`[CopcDataSource] EPSG:${epsgCode} proj4 정의 로드 완료`);
-          return { proj, projDef: proj4Def, zFactor, xyFactor: zFactor };
-        }
-      }
-    } catch (fetchErr) {
-      console.warn(`[CopcDataSource] epsg.io EPSG:${epsgCode} 정의 가져오기 실패:`, fetchErr.message);
+    const proj4Def = lookupEpsg(epsgCode);
+    if (proj4Def) {
+      proj4.defs(proj, proj4Def);
+      console.debug(`[CopcDataSource] EPSG:${epsgCode} 로컬 테이블에서 proj4 정의 로드`);
+      return { proj, projDef: proj4Def, zFactor, xyFactor: zFactor };
     }
+    console.warn(`[CopcDataSource] EPSG:${epsgCode} 로컬 테이블에 없음 — 기본값(EPSG:4326) 사용`);
   }
 
   console.warn('[CopcDataSource] WKT CRS 자동 감지 실패 — 기본값(EPSG:4326) 사용');
