@@ -276,9 +276,6 @@ export class CopcDataSource {
       this._nodes    = nodes;
       this._maxDepth = Math.max(...Object.keys(nodes).map(getDepth));
 
-      // 고도 자동 보정 (지형 샘플링 → geoidOffset 설정)
-      await this._autoDetectGeoidOffset();
-
       // 데이터 중심으로 카메라 이동
       const rootSphere = this._sphere('0-0-0-0');
 
