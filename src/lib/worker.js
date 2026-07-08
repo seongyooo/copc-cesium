@@ -4,6 +4,12 @@
  * 메인 스레드에서 copc.js로 추출한 raw 좌표 배열을 받아
  * proj4 변환 + WGS84 Cartesian3 계산을 수행합니다.
  * (copc.js / laz-perf.wasm 사용 안 함)
+ *
+ * 변경 이력:
+ *  B-6: EPSG:4326 데이터는 proj4 항등변환 불필요 → 스킵 (성능)
+ *  A-7: RGB max 샘플링으로 8-bit / 16-bit 자동 판별
+ *  C-4: colors를 Float32Array → Uint8Array로 직접 반환
+ *       (메인 스레드의 변환 루프 제거 + 전송 크기 4배 절약)
  */
 import proj4 from 'proj4';
 
@@ -24,27 +30,26 @@ function lonLatAltToCartesian(lonDeg, latDeg, altM) {
   ];
 }
 
-// srcProj별 등록 여부 추적 (boolean 플래그 대신 Set 사용)
-// Worker 재생성 시 Set이 초기화되므로 자동으로 재등록됨
+// srcProj별 등록 여부 추적
 const _registeredProjs = new Set();
 
 self.onmessage = ({ data }) => {
   const { id, xs, ys, zs, rs, gs, bs, pointCount, srcProj, projDef, geoidOffset } = data;
 
   try {
-    // 입력값 검증
     if (!Number.isInteger(pointCount) || pointCount < 0 || pointCount > 10_000_000) {
       throw new Error(`유효하지 않은 pointCount: ${pointCount}`);
     }
 
-    // proj4 정의 등록 (srcProj별 1회, Worker 재생성 시에도 재등록)
+    // ── proj4 정의 등록 ─────────────────────────────────────
     if (srcProj !== 'EPSG:4326' && projDef && !_registeredProjs.has(srcProj)) {
       proj4.defs(srcProj, projDef);
       _registeredProjs.add(srcProj);
     }
 
-    // proj4 설정 검증: 첫 포인트로 빠른 실패 (전체 루프 전에 감지)
-    if (srcProj !== 'EPSG:4326' && pointCount > 0) {
+    // ── proj4 설정 검증 (첫 포인트로 빠른 실패) ─────────────
+    const needsProj = srcProj !== 'EPSG:4326'; // B-6: 4326이면 항등변환이므로 스킵
+    if (needsProj && pointCount > 0) {
       const [testLon, testLat] = proj4(srcProj, 'EPSG:4326', [xs[0], ys[0]]);
       if (!isFinite(testLon) || !isFinite(testLat)) {
         throw new Error(
@@ -54,25 +59,46 @@ self.onmessage = ({ data }) => {
       }
     }
 
+    // ── A-7: RGB 비트 심도 자동 판별 ────────────────────────
+    // COPC 포맷은 R/G/B를 uint16(0-65535) 또는 uint8(0-255)로 저장할 수 있다.
+    // 최댓값을 샘플링하여 255 초과 시 16-bit, 이하이면 8-bit로 판정.
+    let maxColor = 0;
+    for (let i = 0; i < pointCount; i++) {
+      if (rs[i] > maxColor) maxColor = rs[i];
+      if (gs[i] > maxColor) maxColor = gs[i];
+      if (bs[i] > maxColor) maxColor = bs[i];
+    }
+    const colorScale = maxColor > 255 ? 65535 : 255;
+
+    // ── 출력 버퍼 ────────────────────────────────────────────
     const positions = new Float64Array(pointCount * 3);
-    const colors    = new Float32Array(pointCount * 4);
+    // C-4: Uint8Array로 직접 생성 (Float32 대비 전송 크기 4배 절약)
+    const colors    = new Uint8Array(pointCount * 4);
 
     for (let i = 0; i < pointCount; i++) {
-      const [lon, lat] = proj4(srcProj, 'EPSG:4326', [xs[i], ys[i]]);
-      const alt        = zs[i] * 0.3048 + geoidOffset;
+      // B-6: EPSG:4326이면 proj4 호출 스킵 (항등변환)
+      let lon, lat;
+      if (needsProj) {
+        [lon, lat] = proj4(srcProj, 'EPSG:4326', [xs[i], ys[i]]);
+      } else {
+        lon = xs[i];
+        lat = ys[i];
+      }
+
+      const alt          = zs[i] * 0.3048 + geoidOffset;
       const [cx, cy, cz] = lonLatAltToCartesian(lon, lat, alt);
 
       positions[i * 3]     = cx;
       positions[i * 3 + 1] = cy;
       positions[i * 3 + 2] = cz;
 
-      colors[i * 4]     = rs[i] / 65535;
-      colors[i * 4 + 1] = gs[i] / 65535;
-      colors[i * 4 + 2] = bs[i] / 65535;
-      colors[i * 4 + 3] = 1.0;
+      // C-4: 0-255 Uint8로 직접 저장
+      colors[i * 4]     = (rs[i] / colorScale * 255 + 0.5) | 0;
+      colors[i * 4 + 1] = (gs[i] / colorScale * 255 + 0.5) | 0;
+      colors[i * 4 + 2] = (bs[i] / colorScale * 255 + 0.5) | 0;
+      colors[i * 4 + 3] = 255;
     }
 
-    // Transferable: 버퍼 복사 없이 메인 스레드로 이동
     self.postMessage(
       { id, positions, colors, pointCount },
       [positions.buffer, colors.buffer],

@@ -88,11 +88,16 @@ export class WorkerPool {
   destroy() {
     this._idle.forEach(w => w.terminate());
     this._idle = [];
-    // 대기 중인 작업은 reject
+    // 대기 중인 작업 reject (A-4: 이전에는 _queue만 처리, _pending 누락)
     for (const { reject } of this._queue) {
       reject(new Error('WorkerPool destroyed'));
     }
     this._queue = [];
+    // Worker에 이미 디스패치된 pending 작업도 reject
+    for (const { reject } of this._pending.values()) {
+      reject(new Error('WorkerPool destroyed'));
+    }
+    this._pending.clear();
   }
 
   _flush() {

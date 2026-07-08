@@ -89,7 +89,7 @@ async function loadCopc(url, opts = {}) {
       geoidOffset:   opts.geoidOffset ?? 0,
       concurrency:   5,
       debounceMs:    300,
-      maxCacheNodes: 40,
+      maxCacheNodes: 150, // B-5: maxVisibleNodes(100)보다 크게 유지해야 eviction 동작
       pixelSize:     2,
     });
 

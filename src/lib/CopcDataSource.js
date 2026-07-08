@@ -49,7 +49,7 @@ export class CopcDataSource {
       geoidOffset:    0,
       concurrency:    5,
       debounceMs:     300,
-      maxCacheNodes:   80,
+      maxCacheNodes:   150,  // B-5: maxVisibleNodes(100)보다 크게 유지해야 eviction 동작
       maxVisibleNodes: 100,
       pixelSize:       2,
       sseThreshold:    250,
@@ -87,7 +87,9 @@ export class CopcDataSource {
     // 결과를 버려 구형 시점의 노드가 씬에 추가되는 것을 막는다.
     this._loadGen = 0;
 
-    this._onProgress = null;
+    this._onProgress    = null;
+    this._destroyed     = false; // A-3: 이중 호출·재진입 방지
+    this._lastSphereMap = null;  // C-1: _updateVisibility proj4 재호출 방지
   }
 
   // ── 정적 팩토리 ─────────────────────────────────────────────
@@ -107,32 +109,40 @@ export class CopcDataSource {
   // ── 초기화 ──────────────────────────────────────────────────
 
   async _init(url) {
-    this._url  = url;
-    this._copc = await Copc.create(url);
+    // A-2: 초기화 실패 시 이미 생성된 리소스를 정리한다.
+    try {
+      this._url  = url;
+      this._copc = await Copc.create(url);
 
-    const [minx, miny, minz, maxx, maxy, maxz] = this._copc.info.cube;
-    this._rootCenter   = { x: (minx + maxx) / 2, y: (miny + maxy) / 2, z: (minz + maxz) / 2 };
-    this._rootHalfSize = (maxx - minx) / 2;
+      const [minx, miny, minz, maxx, maxy, maxz] = this._copc.info.cube;
+      this._rootCenter   = { x: (minx + maxx) / 2, y: (miny + maxy) / 2, z: (minz + maxz) / 2 };
+      this._rootHalfSize = (maxx - minx) / 2;
 
-    const { nodes } = await Copc.loadHierarchyPage(url, this._copc.info.rootHierarchyPage);
-    this._nodes    = nodes;
-    this._maxDepth = Math.max(...Object.keys(nodes).map(getDepth));
+      const { nodes } = await Copc.loadHierarchyPage(url, this._copc.info.rootHierarchyPage);
+      this._nodes    = nodes;
+      this._maxDepth = Math.max(...Object.keys(nodes).map(getDepth));
 
-    // 데이터 중심으로 카메라 이동
-    const rootSphere = this._sphere('0-0-0-0');
-    await new Promise(resolve => {
-      this._viewer.camera.flyToBoundingSphere(rootSphere, {
-        offset: new Cesium.HeadingPitchRange(
-          Cesium.Math.toRadians(0),
-          Cesium.Math.toRadians(-45),
-          rootSphere.radius * 4,
-        ),
-        complete: resolve,
+      // 데이터 중심으로 카메라 이동
+      const rootSphere = this._sphere('0-0-0-0');
+      await new Promise(resolve => {
+        this._viewer.camera.flyToBoundingSphere(rootSphere, {
+          offset: new Cesium.HeadingPitchRange(
+            Cesium.Math.toRadians(0),
+            Cesium.Math.toRadians(-45),
+            rootSphere.radius * 4,
+          ),
+          complete: resolve,
+        });
       });
-    });
 
-    await this._updateLoD();
-    this._startListening();
+      await this._updateLoD();
+      this._startListening();
+    } catch (err) {
+      // WorkerPool 종료 + 씬에서 컨테이너 제거 후 재throw
+      this._pool.destroy();
+      this._viewer.scene.primitives.remove(this._container);
+      throw err;
+    }
   }
 
   // ── 내부 유틸 ───────────────────────────────────────────────
@@ -154,7 +164,12 @@ export class CopcDataSource {
     const cv = getCullingVolume(this._viewer.camera);
     for (const key of this._lastTargetSet) {
       const data = this._cache.get(key);
-      if (data) data.collection.show = isInFrustum(this._sphere(key), cv);
+      if (data) {
+        // C-1: _lastSphereMap 재사용으로 proj4 재호출 방지
+        const sphere = (this._lastSphereMap && this._lastSphereMap.get(key))
+          ?? this._sphere(key);
+        data.collection.show = isInFrustum(sphere, cv);
+      }
     }
   }
 
@@ -189,12 +204,10 @@ export class CopcDataSource {
 
     const visibleKeys = [];
     let   culled      = 0;
+    let   maxDepth    = 0; // C-2: BFS 루프 내에서 직접 추적 (Math.max 스프레드 제거)
     const queue       = ['0-0-0-0'];
 
     while (queue.length > 0) {
-      // 렌더링 노드 상한 초과 시 BFS 중단 (OOM 방지)
-      if (visibleKeys.length >= maxNodes) break;
-
       const key = queue.shift();
 
       // 계층에 없는 노드는 스킵
@@ -219,34 +232,37 @@ export class CopcDataSource {
       // 존재하는 자식 노드 목록 (pointCount 무관 — 탐색은 계속해야 함)
       const children = getChildKeys(key).filter(k => this._nodes[k]);
 
-      if (sse > threshold && children.length > 0) {
+      // B-1: maxNodes 한도 내이고 SSE 초과 시만 자식 확장.
+      // 한도 초과 시 현재 노드를 리프로 사용 → 이미 큐에 쌓인 자식 구역에
+      // 구멍(hole)이 생기지 않음.
+      if (visibleKeys.length < maxNodes && sse > threshold && children.length > 0) {
         // 아직 화면에서 너무 크게 보임 → 자식으로 세분화
         children.forEach(k => queue.push(k));
       } else {
-        // 충분히 세밀하거나 더 이상 자식 없음 → 이 노드를 렌더링
+        // 충분히 세밀하거나 자식 없음, 또는 노드 한도 도달 → 이 노드를 렌더링
         visibleKeys.push(key);
+        const d = getDepth(key); // C-2
+        if (d > maxDepth) maxDepth = d;
       }
     }
 
     // ── 중심 우선 정렬 ──
     // sphereMap에서 O(1)로 꺼내므로 sort 중 proj4 재실행 없음.
-    const camPos   = camera.position;
-    const camDir   = camera.direction;
-    const scratchV = new Cesium.Cartesian3();
+    // B-3: 두 개의 별도 scratch 사용 (a·b 계산 중 덮어쓰기 방지)
+    const camPos    = camera.position;
+    const camDir    = camera.direction;
+    const scratchA  = new Cesium.Cartesian3();
+    const scratchB  = new Cesium.Cartesian3();
 
     visibleKeys.sort((a, b) => {
-      Cesium.Cartesian3.subtract(getSphere(a).center, camPos, scratchV);
-      Cesium.Cartesian3.normalize(scratchV, scratchV);
-      const dotA = Cesium.Cartesian3.dot(scratchV, camDir);
-      Cesium.Cartesian3.subtract(getSphere(b).center, camPos, scratchV);
-      Cesium.Cartesian3.normalize(scratchV, scratchV);
-      const dotB = Cesium.Cartesian3.dot(scratchV, camDir);
+      Cesium.Cartesian3.subtract(getSphere(a).center, camPos, scratchA);
+      Cesium.Cartesian3.normalize(scratchA, scratchA);
+      const dotA = Cesium.Cartesian3.dot(scratchA, camDir);
+      Cesium.Cartesian3.subtract(getSphere(b).center, camPos, scratchB);
+      Cesium.Cartesian3.normalize(scratchB, scratchB);
+      const dotB = Cesium.Cartesian3.dot(scratchB, camDir);
       return dotB - dotA;
     });
-
-    const maxDepth = visibleKeys.length > 0
-      ? Math.max(...visibleKeys.map(getDepth))
-      : 0;
 
     return { visibleKeys, sphereMap, culled, maxDepth };
   }
@@ -254,6 +270,7 @@ export class CopcDataSource {
   // ── 느린 경로: LoD 계산 + 새 노드 로드 ─────────────────────
 
   async _updateLoD() {
+    if (this._destroyed) return; // A-3: destroy() 후 재진입 방지
     if (this._isUpdating) { this._pendingUpdate = true; return; }
     this._isUpdating = true;
     // 이 업데이트 시작 시점의 세대 번호를 캡처.
@@ -269,6 +286,7 @@ export class CopcDataSource {
       const targetSet = new Set(visibleKeys);
       // _updateVisibility 빠른 경로에서 사용할 수 있도록 즉시 저장
       this._lastTargetSet = targetSet;
+      this._lastSphereMap = sphereMap; // C-1: _updateVisibility proj4 재호출 방지
 
       // sphereMap에 없는 키는 여기서 계산 (toLoad.sort 등에서 재사용)
       const getSphere = (key) => {
@@ -396,10 +414,13 @@ export class CopcDataSource {
     // concurrency 수만큼만 동시에 실행 — loadNode는 pool.run 전에도
     // Float64Array × 3 + Float32Array × 3 를 할당하므로 동시 시작 수를
     // 반드시 제한해야 OOM을 막을 수 있음.
+    // A-1: task 별 try/catch — 하나 실패해도 나머지 계속 실행.
     const limit   = this._opts.concurrency;
     const running = new Set();
     for (const task of tasks) {
-      const p = task().finally(() => running.delete(p));
+      const p = Promise.resolve().then(task).catch(err => {
+        console.warn('[CopcDataSource] 노드 로드 실패:', err);
+      }).finally(() => running.delete(p));
       running.add(p);
       if (running.size >= limit) await Promise.race(running);
     }
@@ -455,6 +476,7 @@ export class CopcDataSource {
 
   /** 모든 리소스를 해제하고 Viewer에서 제거합니다. */
   destroy() {
+    this._destroyed = true; // A-3: 이후 _updateLoD 재진입 차단
     clearTimeout(this._debounceTimer);
     if (this._removeCameraListener)  this._removeCameraListener();
     if (this._removeMoveEndListener) this._removeMoveEndListener();

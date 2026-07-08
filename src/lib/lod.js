@@ -1,52 +1,7 @@
 import * as Cesium from 'cesium';
 import proj4 from 'proj4';
 
-/**
- * 카메라에서 화면 중앙 pick 포인트까지의 거리를 Octree 깊이로 변환 (로그 스케일)
- *
- * 고도 기반이 아닌 실제 3D 거리 기반으로, 수평 시점에서도 올바른 LoD 적용.
- * pick 실패 시 타원체 교차 → 고도 기반 순으로 fallback.
- *
- * @param {Cesium.Scene}  scene
- * @param {Cesium.Camera} camera
- * @param {number}        maxDepth  데이터의 최대 깊이
- */
-export function distanceToDepth(scene, camera, maxDepth) {
-  const NEAR = 200;   // 200m 이내 → maxDepth
-  const FAR  = 8000;  // 8km 이상  → depth 0
-
-  let dist;
-
-  // 1. 화면 중앙 ray → 지구 표면 pick
-  const canvas = scene.canvas;
-  const ray = camera.getPickRay(
-    new Cesium.Cartesian2(canvas.clientWidth / 2, canvas.clientHeight / 2),
-  );
-
-  if (ray) {
-    const hit = scene.globe.pick(ray, scene);
-    if (Cesium.defined(hit)) {
-      dist = Cesium.Cartesian3.distance(camera.position, hit);
-    } else {
-      // 2. fallback: 타원체 교차 (하늘 방향 등 terrain pick 실패 시)
-      const interval = Cesium.IntersectionTests.rayEllipsoid(ray, scene.globe.ellipsoid);
-      if (interval) {
-        const hit2 = Cesium.Ray.getPoint(ray, interval.start, new Cesium.Cartesian3());
-        dist = Cesium.Cartesian3.distance(camera.position, hit2);
-      }
-    }
-  }
-
-  // 3. fallback: 고도 기반
-  if (!dist || !isFinite(dist) || dist <= 0) {
-    dist = camera.positionCartographic.height;
-  }
-
-  if (dist <= NEAR) return maxDepth;
-  if (dist >= FAR)  return 0;
-  const t = Math.log(dist / NEAR) / Math.log(FAR / NEAR);
-  return Math.round((1 - t) * maxDepth);
-}
+// B-4: distanceToDepth — BFS+SSE LoD로 교체되어 미사용, 삭제
 
 /** VoxelKey(D-X-Y-Z)에서 깊이(D) 추출 */
 export function getDepth(key) {

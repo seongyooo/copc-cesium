@@ -96,11 +96,19 @@
     <button id="satelliteBtn" class="ctrl-btn on">🛰 위성지도 ON</button>
   </div>
 
-  <!-- fetch 패치: cache: 'no-store' 강제 (ERR_CACHE_OPERATION_NOT_SUPPORTED 우회) -->
+  <!-- fetch 패치: Range 요청에만 cache:'no-store' 적용 (ERR_CACHE_OPERATION_NOT_SUPPORTED 우회).
+       일반 fetch(지형, 이미지 등)는 그대로 두어 불필요한 캐시 우회를 최소화한다. -->
   <script>
     (function () {
       var _fetch = window.fetch.bind(window);
       window.fetch = function (input, init) {
+        var h = init && init.headers;
+        var isRange = h && (
+          (typeof Headers !== 'undefined' && h instanceof Headers && h.has('Range')) ||
+          (h !== null && typeof h === 'object' && !Array.isArray(h) && ('Range' in h || 'range' in h)) ||
+          (Array.isArray(h) && h.some(function (p) { return p[0] && p[0].toLowerCase() === 'range'; }))
+        );
+        if (!isRange) return _fetch(input, init);
         return _fetch(input, Object.assign({}, init, { cache: 'no-store' }));
       };
     })();

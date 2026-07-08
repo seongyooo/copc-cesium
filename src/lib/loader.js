@@ -230,11 +230,10 @@ export async function loadNode(url, copc, nodeInfo, pool, srcProj, projDef, geoi
     [xs.buffer, ys.buffer, zs.buffer, rs.buffer, gs.buffer, bs.buffer],
   );
 
-  // ── 3. 색상 Uint8 변환 (Float32 대비 4배 메모리 절약) ────
-  const colU8 = new Uint8Array(pointCount * 4);
-  for (let i = 0; i < pointCount * 4; i++) {
-    colU8[i] = (colors[i] * 255 + 0.5) | 0;
-  }
+  // ── 3. 색상 배열 (C-4: Worker가 이미 Uint8Array로 반환) ───
+  // worker.js에서 직접 0-255 Uint8Array로 변환하므로 변환 루프 불필요.
+  // 비트 심도(8/16-bit) 자동 판별도 Worker에서 수행.
+  const colU8 = colors; // Uint8Array (n×4)
 
   // ── 4. ECEF Float64 → Float32 high/low 분리 (RTE) ────────
   //
