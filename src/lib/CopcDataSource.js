@@ -658,27 +658,35 @@ export class CopcDataSource {
   }
 
   _startListening() {
-    this._viewer.camera.percentageChanged = 0.01;
     let prevHeight = this._viewer.camera.positionCartographic.height;
+    let lastLodMs  = 0;
 
-    const handler = () => {
+    // 매 프레임: 현재 시점 기준 프러스텀 갱신 + 200ms 간격 LoD 재계산.
+    // camera.changed 는 위치·방향 변화가 임계치(~1%, ~8°) 초과 시에만 발동해
+    // 소폭 회전(Ctrl+드래그)을 놓치는 문제가 있었으므로 scene.postUpdate로 교체.
+    this._removePostUpdateListener = this._viewer.scene.postUpdate.addEventListener(() => {
+      if (this._destroyed) return;
+
       const h = this._viewer.camera.positionCartographic.height;
-
-      // 줌아웃(고도 상승)일 때만 진행 중인 로드를 무효화한다.
-      // 줌인 중에는 얕은 깊이 캐시가 placeholder로 보이는 것이 자연스러우므로
-      // 기존 로딩을 그대로 유지한다.
-      if (h > prevHeight) this._loadGen++;
+      if (h > prevHeight) this._loadGen++; // 줌아웃 → 진행 중 로드 무효화
       prevHeight = h;
 
       if (!this._isUpdating) this._updateVisibility();
-      this._updateLoD();
-    };
-    this._removeCameraListener = this._viewer.camera.changed.addEventListener(handler);
 
-    // camera.changed 는 위치 변화량 기반이므로 Ctrl+드래그(방향만 변경)에서는
-    // 발동하지 않는다. moveEnd 는 모든 카메라 움직임 종료 시 발동하므로
-    // 방향 전환 후 LoD 갱신을 보장한다.
-    this._removeMoveEndListener = this._viewer.camera.moveEnd.addEventListener(handler);
+      // LoD 재계산: 최대 5fps(200ms) 제한 — 매 프레임 실행은 불필요
+      const now = Date.now();
+      if (now - lastLodMs >= 200) {
+        lastLodMs = now;
+        this._updateLoD();
+      }
+    });
+
+    // 카메라 완전 정지 시 즉시 최종 갱신 (200ms 인터벌과 무관하게 보장)
+    this._removeMoveEndListener = this._viewer.camera.moveEnd.addEventListener(() => {
+      if (this._destroyed) return;
+      lastLodMs = Date.now();
+      this._updateLoD();
+    });
   }
 
   _emit(info) {
@@ -732,8 +740,8 @@ export class CopcDataSource {
   /** 모든 리소스를 해제하고 Viewer에서 제거합니다. */
   destroy() {
     this._destroyed = true; // A-3: 이후 _updateLoD 재진입 차단
-    if (this._removeCameraListener)  this._removeCameraListener();
-    if (this._removeMoveEndListener) this._removeMoveEndListener();
+    if (this._removePostUpdateListener) this._removePostUpdateListener();
+    if (this._removeMoveEndListener)    this._removeMoveEndListener();
     this._pool.destroy();
     for (const data of this._cache.values()) {
       data.collection.destroy();
