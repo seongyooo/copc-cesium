@@ -691,6 +691,13 @@ export class CopcDataSource {
   set heightOffset(v) { this._heightOffsetRef.value = v; }
   get heightOffset()  { return this._heightOffsetRef.value; }
 
+  /** SSE 임계값 px — 높을수록 덜 세밀(빠름), 낮을수록 더 세밀(느림). _updateLoD 즉시 재실행. */
+  set sseThreshold(v) {
+    this._opts.sseThreshold = v;
+    this._updateLoD();
+  }
+  get sseThreshold()  { return this._opts.sseThreshold; }
+
   /**
    * 분류 필터 마스크 설정 — 즉시 반영.
    * 비트 N이 1이면 클래스 N 표시, 0이면 숨김.

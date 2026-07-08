@@ -56,6 +56,8 @@ const allClassCheck     = document.getElementById('allClassCheck');
 const classCheckboxes   = document.getElementById('classCheckboxes');
 const presetBtns        = document.querySelectorAll('.preset-btn');
 const heightOffsetInput = document.getElementById('heightOffsetInput');
+const sseSlider         = document.getElementById('sseSlider');
+const sseVal            = document.getElementById('sseVal');
 
 // ── 현재 로드된 데이터소스 ─────────────────────────────────
 let currentDs        = null;
@@ -82,6 +84,13 @@ pixelSizeSlider.addEventListener('input', () => {
   const v = parseFloat(pixelSizeSlider.value);
   pixelSizeVal.textContent = v;
   if (currentDs) currentDs.pixelSize = v;
+});
+
+// ── 세밀도(SSE threshold) 슬라이더 ────────────────────────
+sseSlider.addEventListener('input', () => {
+  const v = parseInt(sseSlider.value, 10);
+  sseVal.textContent = v;
+  if (currentDs) currentDs.sseThreshold = v;
 });
 
 // ── 고도 보정 입력 ─────────────────────────────────────────
