@@ -173,6 +173,10 @@ let _loadingController = null;  // 중복 로드 방지용
 
 async function loadCopc(url, opts = {}) {
   if (!url.trim()) return;
+  // 상대 URL → 절대 URL 변환 (copc 라이브러리가 상대 URL 미지원)
+  if (/^\/|^\./.test(url.trim())) {
+    url = new URL(url.trim(), window.location.href).href;
+  }
 
   // 진행 중인 로드가 있으면 즉시 중단 표시 (새 로드 우선)
   if (_loadingController) {
