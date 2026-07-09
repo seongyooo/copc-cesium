@@ -1,6 +1,7 @@
 import * as Cesium from 'cesium';
 import 'cesium/Build/Cesium/Widgets/widgets.css';
 import { CopcDataSource } from './lib/CopcDataSource.js';
+import type { ProgressInfo, PresetConfig } from './types.js';
 
 // ── CesiumJS 초기화 ────────────────────────────────────────
 Cesium.Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_TOKEN;
@@ -18,10 +19,10 @@ const viewer = new Cesium.Viewer('cesiumContainer', {
 });
 
 // Cesium 크레딧 컨테이너를 우리 UI와 겹치지 않게 처리
-viewer.cesiumWidget.creditContainer.style.display = 'none';
+(viewer.cesiumWidget.creditContainer as HTMLElement).style.display = 'none';
 
 // ── 프리셋 데이터셋 ────────────────────────────────────────
-const PRESETS = {
+const PRESETS: Record<string, PresetConfig> = {
   autzen: {
     label:       'Autzen Stadium',
     pts:         '10.7M',
@@ -58,9 +59,18 @@ const PRESETS = {
     zFactor:     1.0,
   },
   nztm: {
-    label:       'New Zealand (NZTM2000)',
-    pts:         '—',
+    label:       'New Zealand 1 (NZTM2000)',
+    pts:         '44.2M',
     url:         '/points_2.copc.laz',
+    proj:        'EPSG:2193',
+    projDef:     '+proj=tmerc +lat_0=0 +lon_0=173 +k=0.9996 +x_0=1600000 +y_0=10000000 +ellps=GRS80 +units=m +no_defs',
+    geoidOffset: 0,
+    zFactor:     1.0,
+  },
+  nztm2: {
+    label:       'New Zealand 2 (NZTM2000)',
+    pts:         '45.1M',
+    url:         '/points_3.copc.laz',
     proj:        'EPSG:2193',
     projDef:     '+proj=tmerc +lat_0=0 +lon_0=173 +k=0.9996 +x_0=1600000 +y_0=10000000 +ellps=GRS80 +units=m +no_defs',
     geoidOffset: 0,
@@ -69,77 +79,79 @@ const PRESETS = {
 };
 
 // ── UI 요소 참조 ───────────────────────────────────────────
-const app           = document.getElementById('app');
-const panel         = document.getElementById('panel');
-const collapseBtn   = document.getElementById('collapseBtn');
-const panelTitle    = document.getElementById('panelTitle');
-const presetList    = document.getElementById('presetList');
-const presetCount   = document.getElementById('presetCount');
-const urlInput      = document.getElementById('urlInput');
-const loadBtn       = document.getElementById('loadBtn');
+const app           = document.getElementById('app')!;
+const panel         = document.getElementById('panel')!;
+const collapseBtn   = document.getElementById('collapseBtn')!;
+const panelTitle    = document.getElementById('panelTitle')!;
+const presetList    = document.getElementById('presetList')!;
+const presetCount   = document.getElementById('presetCount')!;
+const urlInput      = document.getElementById('urlInput') as HTMLInputElement;
+const loadBtn       = document.getElementById('loadBtn') as HTMLButtonElement;
 
-const sseSlider     = document.getElementById('sseSlider');
-const sseDisplay    = document.getElementById('sseDisplay');
-const terrainSelect = document.getElementById('terrainSelect');
-const imagerySelect = document.getElementById('imagerySelect');
+const sseSlider     = document.getElementById('sseSlider') as HTMLInputElement;
+const sseDisplay    = document.getElementById('sseDisplay')!;
+const terrainSelect = document.getElementById('terrainSelect') as HTMLSelectElement;
+const imagerySelect = document.getElementById('imagerySelect') as HTMLSelectElement;
 
-const colorModeGrid  = document.getElementById('colorModeGrid');
-const opacitySlider  = document.getElementById('opacitySlider');
-const opacityDisplay = document.getElementById('opacityDisplay');
+const colorModeGrid  = document.getElementById('colorModeGrid')!;
+const opacitySlider  = document.getElementById('opacitySlider') as HTMLInputElement | null;
+const opacityDisplay = document.getElementById('opacityDisplay')!;
 
-const filterAllRow   = document.getElementById('filterAllRow');
-const filterAllCheck = document.getElementById('filterAllCheck');
-const classFilterList = document.getElementById('classFilterList');
+const filterAllRow   = document.getElementById('filterAllRow')!;
+const filterAllCheck = document.getElementById('filterAllCheck')!;
+const classFilterList = document.getElementById('classFilterList')!;
 
-const pixelSizeSlider   = document.getElementById('pixelSizeSlider');
-const pixelSizeDisplay  = document.getElementById('pixelSizeDisplay');
-const heightOffsetInput = document.getElementById('heightOffsetInput');
+const pixelSizeSlider   = document.getElementById('pixelSizeSlider') as HTMLInputElement;
+const pixelSizeDisplay  = document.getElementById('pixelSizeDisplay')!;
+const heightOffsetInput = document.getElementById('heightOffsetInput') as HTMLInputElement;
 
-const infoName   = document.getElementById('infoName');
-const infoMeta   = document.getElementById('infoMeta');
-const infoStatus = document.getElementById('infoStatus');
+const infoName   = document.getElementById('infoName')!;
+const infoMeta   = document.getElementById('infoMeta')!;
+const infoStatus = document.getElementById('infoStatus')!;
 
-const chipDot  = document.getElementById('chipDot');
-const chipName = document.getElementById('chipName');
-const chipPts  = document.getElementById('chipPts');
-const themeBtn = document.getElementById('themeBtn');
-const homeBtn  = document.getElementById('homeBtn');
-const zoomInBtn  = document.getElementById('zoomInBtn');
-const zoomOutBtn = document.getElementById('zoomOutBtn');
+const chipDot  = document.getElementById('chipDot')!;
+const chipName = document.getElementById('chipName')!;
+const chipPts  = document.getElementById('chipPts')!;
+const themeBtn = document.getElementById('themeBtn')!;
+const homeBtn  = document.getElementById('homeBtn')!;
+const zoomInBtn  = document.getElementById('zoomInBtn')!;
+const zoomOutBtn = document.getElementById('zoomOutBtn')!;
 
-const ftLon   = document.getElementById('ftLon');
-const ftLat   = document.getElementById('ftLat');
-const ftElev  = document.getElementById('ftElev');
-const ftCam   = document.getElementById('ftCam');
-const ftEpsg  = document.getElementById('ftEpsg');
-const ftNodes = document.getElementById('ftNodes');
-const ftFps   = document.getElementById('ftFps');
+const ftLon   = document.getElementById('ftLon')!;
+const ftLat   = document.getElementById('ftLat')!;
+const ftElev  = document.getElementById('ftElev')!;
+const ftCam   = document.getElementById('ftCam')!;
+const ftEpsg  = document.getElementById('ftEpsg')!;
+const ftNodes = document.getElementById('ftNodes')!;
+const ftFps   = document.getElementById('ftFps')!;
 
 // ── 패널 탭 전환 ───────────────────────────────────────────
-const PANEL_TITLES = {
+const PANEL_TITLES: Record<string, string> = {
   data: 'Data', global: 'Global', appearance: 'Appearance',
   filter: 'Filter', points: 'Points', info: 'Info', help: 'Help',
 };
 let currentTab = 'data';
 
-function switchTab(tab) {
-  document.querySelectorAll('.rail-btn[data-tab]').forEach(btn =>
-    btn.classList.toggle('active', btn.dataset.tab === tab)
-  );
-  document.querySelectorAll('.panel-section').forEach(sec =>
-    sec.classList.toggle('active', sec.id === `sec-${tab}`)
-  );
+function switchTab(tab: string): void {
+  document.querySelectorAll('.rail-btn[data-tab]').forEach(btn => {
+    const el = btn as HTMLElement;
+    el.classList.toggle('active', el.dataset.tab === tab);
+  });
+  document.querySelectorAll('.panel-section').forEach(sec => {
+    const el = sec as HTMLElement;
+    el.classList.toggle('active', el.id === `sec-${tab}`);
+  });
   panelTitle.textContent = PANEL_TITLES[tab] ?? tab;
   currentTab = tab;
   if (panel.classList.contains('collapsed')) toggleCollapse(false);
 }
 
 document.querySelectorAll('.rail-btn[data-tab]').forEach(btn =>
-  btn.addEventListener('click', () => switchTab(btn.dataset.tab))
+  btn.addEventListener('click', () => switchTab((btn as HTMLElement).dataset.tab ?? ''))
 );
 
 // ── 패널 접기/펴기 ─────────────────────────────────────────
-function toggleCollapse(forceCollapsed) {
+function toggleCollapse(forceCollapsed?: boolean): void {
   const collapsed = forceCollapsed !== undefined ? forceCollapsed : !panel.classList.contains('collapsed');
   panel.classList.toggle('collapsed', collapsed);
   collapseBtn.classList.toggle('collapsed', collapsed);
@@ -151,7 +163,7 @@ let theme = 'dark';
 const SUN_ICON = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4 12H2M22 12h-2M5 5l1.5 1.5M17.5 17.5 19 19M19 5l-1.5 1.5M6.5 17.5 5 19"/></svg>`;
 const MOON_ICON = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>`;
 
-function applyTheme(t) {
+function applyTheme(t: string): void {
   theme = t;
   app.setAttribute('data-theme', t);
   themeBtn.innerHTML = t === 'dark' ? SUN_ICON : MOON_ICON;
@@ -214,29 +226,29 @@ heightOffsetInput.addEventListener('input', () => {
 
 // ── Appearance: 색상 모드 (시각적 상태 관리만) ─────────────
 colorModeGrid.addEventListener('click', e => {
-  const btn = e.target.closest('.color-btn');
+  const btn = (e.target as HTMLElement).closest('.color-btn');
   if (!btn) return;
   colorModeGrid.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   // TODO: CopcDataSource 색상 모드 API 연동
 });
 
-if (document.getElementById('opacitySlider')) {
-  document.getElementById('opacitySlider').addEventListener('input', e => {
-    opacityDisplay.textContent = `${Math.round(e.target.value)}%`;
+if (opacitySlider) {
+  opacitySlider.addEventListener('input', e => {
+    opacityDisplay.textContent = `${Math.round(parseFloat((e.target as HTMLInputElement).value))}%`;
     // TODO: CopcDataSource opacity API 연동
   });
 }
 
 // ── 분류 필터 ──────────────────────────────────────────────
-const ASPRS = {
+const ASPRS: Record<number, string> = {
   0: '미분류 (0)', 1: '미분류 (1)', 2: '지면', 3: '낮은 식생',
   4: '중간 식생', 5: '높은 식생', 6: '건물', 7: '잡음 (저점)',
   8: '예약 (8)', 9: '수면', 10: '철도', 11: '도로면',
   12: '중첩점', 13: '와이어 (가드)', 14: '와이어 (전선)',
   15: '송전탑', 16: '와이어 (연결)', 17: '브리지', 18: '잡음 (고점)',
 };
-const CLS_COLORS = {
+const CLS_COLORS: Record<number, string> = {
   0: '#808080', 1: '#909090', 2: '#8d6e4f', 3: '#78c86e',
   4: '#4caf6a', 5: '#2d8a4e', 6: '#d98b3a', 7: '#e05555',
   8: '#aaa', 9: '#3a86c9', 10: '#a0522d', 11: '#c8b400',
@@ -244,10 +256,10 @@ const CLS_COLORS = {
   16: '#deb887', 17: '#cd853f', 18: '#ff4444',
 };
 
-let _renderedClasses = new Set();
-let _classOn = {};  // cls → boolean
+let _renderedClasses = new Set<number>();
+let _classOn: Record<number, boolean> = {};
 
-function updateClassMask() {
+function updateClassMask(): void {
   if (!currentDs) return;
   const allOn = Object.values(_classOn).every(v => v);
   if (allOn) {
@@ -261,12 +273,12 @@ function updateClassMask() {
   currentDs.setClassMask(mask);
 }
 
-function syncAllCheck() {
+function syncAllCheck(): void {
   const allOn = Object.values(_classOn).every(v => v !== false);
   filterAllCheck.classList.toggle('on', allOn);
 }
 
-function rebuildClassList() {
+function rebuildClassList(): void {
   const sorted = [..._renderedClasses].sort((a, b) => a - b);
   classFilterList.innerHTML = '';
   for (const c of sorted) {
@@ -292,7 +304,7 @@ function rebuildClassList() {
   }
 }
 
-function refreshClassPanel(seenClasses) {
+function refreshClassPanel(seenClasses: Set<number> | undefined): void {
   if (!seenClasses || seenClasses.size === 0) return;
   let changed = false;
   for (const c of seenClasses) {
@@ -307,7 +319,7 @@ function refreshClassPanel(seenClasses) {
 filterAllRow.addEventListener('click', () => {
   const allOn = Object.values(_classOn).every(v => v !== false);
   const newVal = !allOn;
-  for (const k of Object.keys(_classOn)) _classOn[k] = newVal;
+  for (const k of Object.keys(_classOn)) _classOn[parseInt(k)] = newVal;
   rebuildClassList();
   syncAllCheck();
   updateClassMask();
@@ -315,9 +327,9 @@ filterAllRow.addEventListener('click', () => {
 
 // ── 프리셋 목록 렌더링 ─────────────────────────────────────
 const PRESET_KEYS = Object.keys(PRESETS);
-presetCount.textContent = PRESET_KEYS.length;
+presetCount.textContent = String(PRESET_KEYS.length);
 
-function renderPresetList(activeKey) {
+function renderPresetList(activeKey: string | null): void {
   presetList.innerHTML = '';
   for (const key of PRESET_KEYS) {
     const p = PRESETS[key];
@@ -330,7 +342,7 @@ function renderPresetList(activeKey) {
     btn.addEventListener('click', () => {
       setActivePreset(key);
       urlInput.value = p.url;
-      loadCopc(p.url, p);
+      void loadCopc(p.url, p);
     });
     presetList.appendChild(btn);
   }
@@ -338,12 +350,12 @@ function renderPresetList(activeKey) {
 renderPresetList(null);
 
 // ── 현재 로드 상태 ─────────────────────────────────────────
-let currentDs        = null;
-let activePreset     = null;
-let activePresetOpts = null;
-let activeLabel      = null;
+let currentDs: CopcDataSource | null       = null;
+let activePreset: string | null            = null;
+let activePresetOpts: PresetConfig | null  = null;
+let activeLabel: string | null             = null;
 
-function setActivePreset(key) {
+function setActivePreset(key: string | null): void {
   activePreset     = key;
   activePresetOpts = key ? PRESETS[key] : null;
   activeLabel      = key ? PRESETS[key].label : null;
@@ -351,8 +363,7 @@ function setActivePreset(key) {
 }
 
 // ── 칩 상태 업데이트 ───────────────────────────────────────
-function setChipState(state, label, pts) {
-  // state: 'idle' | 'loading' | 'active'
+function setChipState(state: 'idle' | 'loading' | 'active', label?: string, pts?: string | null): void {
   chipDot.className = 'chip-dot' + (state === 'active' ? ' active' : state === 'loading' ? ' loading' : '');
   chipName.textContent = label || 'No data loaded';
   if (pts) {
@@ -364,7 +375,7 @@ function setChipState(state, label, pts) {
 }
 
 // ── Info 패널 업데이트 ─────────────────────────────────────
-function updateInfoPanel(name, rows) {
+function updateInfoPanel(name: string, rows: [string, string][]): void {
   infoName.textContent = name || '—';
   infoMeta.innerHTML = rows.map(([k, v]) =>
     `<div class="meta-row"><span class="meta-key">${k}</span><span class="meta-val">${v}</span></div>`
@@ -372,7 +383,7 @@ function updateInfoPanel(name, rows) {
 }
 
 // ── 푸터 업데이트 (카메라 위치) ────────────────────────────
-function updateFooter() {
+function updateFooter(): void {
   const cpos = viewer.camera.positionCartographic;
   if (!cpos) return;
   const lon  = Cesium.Math.toDegrees(cpos.longitude);
@@ -396,16 +407,16 @@ viewer.scene.postRender.addEventListener(() => {
   _frames++;
   const now = performance.now();
   if (now - _lastFpsTime >= 1000) {
-    ftFps.textContent = _frames;
+    ftFps.textContent = String(_frames);
     _frames = 0;
     _lastFpsTime = now;
   }
 });
 
 // ── COPC 로드 함수 ─────────────────────────────────────────
-let _loadingController = null;
+let _loadingController: { abort: boolean } | null = null;
 
-async function loadCopc(url, opts = {}) {
+async function loadCopc(url: string, opts: Partial<PresetConfig> = {}): Promise<void> {
   if (!url.trim()) return;
   if (/^\/|^\./.test(url.trim())) {
     url = new URL(url.trim(), window.location.href).href;
@@ -424,7 +435,7 @@ async function loadCopc(url, opts = {}) {
   filterAllCheck.classList.add('on');
   heightOffsetInput.value = '0';
 
-  const label = activeLabel || url.split('/').pop().replace(/\.copc\.laz$/, '');
+  const label = activeLabel || url.split('/').pop()!.replace(/\.copc\.laz$/, '');
   setChipState('loading', label);
   infoStatus.textContent = '📡 초기화 중...';
   loadBtn.disabled = true;
@@ -446,7 +457,6 @@ async function loadCopc(url, opts = {}) {
     ds.sseThreshold = parseInt(sseSlider.value, 10);
     setChipState('active', label);
 
-    // Info 패널 초기 메타데이터 (COPC로부터 알 수 있는 정보)
     const epsg = opts.proj ?? 'EPSG:4326';
     ftEpsg.textContent = epsg.replace('EPSG:', '');
     updateInfoPanel(label, [
@@ -457,7 +467,7 @@ async function loadCopc(url, opts = {}) {
     ]);
     infoStatus.textContent = '';
 
-    ds.onProgress = ({ depth, visible, culled, loading, points, cached, height, seenClasses }) => {
+    ds.onProgress = ({ depth, visible, culled, loading, points, cached, height, seenClasses }: ProgressInfo) => {
       refreshClassPanel(seenClasses);
 
       const pts = points ? `${(points / 1e6).toFixed(1)}M pts` : null;
@@ -473,12 +483,11 @@ async function loadCopc(url, opts = {}) {
           `✅ 깊이 ${depth} | 노드 ${visible}개 (컬링 ${culled}개) | 캐시 ${cached}/${ds.maxCacheNodes}`;
       }
 
-      // Info 패널 메타 업데이트 (포인트 수 추가)
       if (points) {
         updateInfoPanel(label, [
           ['Format', 'COPC 1.0'],
           ['CRS', epsg],
-          ['Points', (points).toLocaleString()],
+          ['Points', points.toLocaleString()],
           ['Depth', String(depth)],
           ['Nodes visible', `${visible} (culled ${culled})`],
           ['Cache', `${cached} / ${ds.maxCacheNodes}`],
@@ -490,7 +499,7 @@ async function loadCopc(url, opts = {}) {
   } catch (err) {
     if (!ctrl.abort) {
       setChipState('idle', 'Load failed');
-      infoStatus.textContent = `❌ ${err.message}`;
+      infoStatus.textContent = `❌ ${(err as Error).message}`;
       console.error(err);
     }
   } finally {
@@ -503,14 +512,14 @@ async function loadCopc(url, opts = {}) {
 loadBtn.addEventListener('click', () => {
   const opts = activePresetOpts ?? {};
   setActivePreset(null);
-  activeLabel = urlInput.value.trim().split('/').pop().replace(/\.copc\.laz$/, '');
-  loadCopc(urlInput.value, opts);
+  activeLabel = urlInput.value.trim().split('/').pop()!.replace(/\.copc\.laz$/, '');
+  void loadCopc(urlInput.value, opts);
 });
 
-urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') loadBtn.click(); });
+urlInput.addEventListener('keydown', (e: KeyboardEvent) => { if (e.key === 'Enter') loadBtn.click(); });
 urlInput.addEventListener('input', () => setActivePreset(null));
 
 // ── 초기 로드: Autzen ─────────────────────────────────────
 setActivePreset('autzen');
 urlInput.value = PRESETS.autzen.url;
-loadCopc(PRESETS.autzen.url, PRESETS.autzen);
+void loadCopc(PRESETS.autzen.url, PRESETS.autzen);

@@ -2,7 +2,7 @@
  * 로컬 EPSG → proj4 정의 테이블
  * epsg.io 네트워크 요청 없이 오프라인에서 좌표 변환을 지원합니다.
  */
-const EPSG_TABLE = {
+const EPSG_TABLE: Record<number, string> = {
   // ── 지리좌표계 ──────────────────────────────────────────────────────────────
   4326: '+proj=longlat +datum=WGS84 +no_defs',
   4269: '+proj=longlat +ellps=GRS80 +datum=NAD83 +no_defs',
@@ -179,7 +179,6 @@ const EPSG_TABLE = {
   // New Jersey
   32111: '+proj=tmerc +lat_0=38.83333333333334 +lon_0=-74.5 +k=0.9999 +x_0=150000 +y_0=0 +datum=NAD83 +units=m +no_defs',
   // New Mexico
-  32112: '+proj=tmerc +lat_0=31 +lon_0=-104.3333333333333 +k=0.999909091 +x_0=165000 +y_0=0 +datum=NAD83 +units=m +no_defs',
   32113: '+proj=tmerc +lat_0=31 +lon_0=-106.25 +k=0.9999 +x_0=500000 +y_0=0 +datum=NAD83 +units=m +no_defs',
   32114: '+proj=tmerc +lat_0=31 +lon_0=-107.8333333333333 +k=0.999916667 +x_0=830000 +y_0=0 +datum=NAD83 +units=m +no_defs',
   // North Carolina
@@ -343,9 +342,8 @@ for (let z = 1; z <= 23; z++) {
 
 /**
  * EPSG 코드로 로컬 테이블에서 proj4 정의 문자열을 조회합니다.
- * @param {string|number} code  EPSG 코드 (숫자 또는 문자열)
- * @returns {string|null}
+ * @param code  EPSG 코드 (숫자 또는 문자열)
  */
-export function lookupEpsg(code) {
-  return EPSG_TABLE[parseInt(code, 10)] ?? null;
+export function lookupEpsg(code: string | number): string | null {
+  return EPSG_TABLE[parseInt(String(code), 10)] ?? null;
 }

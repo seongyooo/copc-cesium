@@ -1,5 +1,10 @@
 import * as Cesium from 'cesium';
 import { Copc } from 'copc';
+import type { Hierarchy } from 'copc';
+import type { Ref, NodeCacheEntry, Renderable } from '../types.js';
+import { WorkerPool } from './WorkerPool.js';
+
+const CesiumAny = Cesium as any;
 
 // ── PointCloudPrimitive ──────────────────────────────────────
 //
@@ -12,20 +17,35 @@ import { Copc } from 'copc';
 // 슬라이더·분류 필터 변경 시 해당 값만 업데이트하면 모든 프리미티브에
 // 즉시 반영된다 (셰이더 리컴파일·재로드 불필요).
 //
-class PointCloudPrimitive {
-  /**
-   * @param {Float32Array} posHigh  ECEF x/y/z 상위 Float32 (n×3)
-   * @param {Float32Array} posLow   ECEF x/y/z 하위 Float32 (n×3)
-   * @param {Uint8Array}   colU8    RGBA 0-255 (n×4)
-   * @param {Uint8Array}   cls      분류값 0-255 (n×1)
-   * @param {number}       pointCount
-   * @param {Cesium.BoundingSphere} boundingSphere
-   * @param {{ value: number }} pixelSizeRef  공유 점 크기 ref
-   * @param {{ value: number }} classMaskRef  공유 분류 마스크 ref (비트 N = 클래스 N 표시)
-   * @param {{ value: Cesium.Cartesian3 }} upVecRef      공유 상향 벡터 ref
-   * @param {{ value: number }} heightOffsetRef 공유 고도 오프셋 ref (m)
-   */
-  constructor(posHigh, posLow, colU8, cls, pointCount, boundingSphere, pixelSizeRef, classMaskRef, upVecRef, heightOffsetRef) {
+class PointCloudPrimitive implements Renderable {
+  private _posHigh: Float32Array | null;
+  private _posLow:  Float32Array | null;
+  private _colU8:   Uint8Array   | null;
+  private _cls:     Uint8Array   | null;
+  private _pointCount: number;
+  private _boundingSphere: Cesium.BoundingSphere;
+  private _pixelSizeRef: Ref<number>;
+  private _classMaskRef: Ref<number>;
+  private _upVecRef: Ref<Cesium.Cartesian3> | null;
+  private _heightOffsetRef: Ref<number> | null;
+  public show: boolean;
+  private _destroyed: boolean;
+  private _cmd: any;
+  private _va:  any;
+  private _sp:  any;
+
+  constructor(
+    posHigh: Float32Array,
+    posLow: Float32Array,
+    colU8: Uint8Array,
+    cls: Uint8Array,
+    pointCount: number,
+    boundingSphere: Cesium.BoundingSphere,
+    pixelSizeRef: Ref<number>,
+    classMaskRef: Ref<number>,
+    upVecRef: Ref<Cesium.Cartesian3> | null,
+    heightOffsetRef: Ref<number> | null,
+  ) {
     this._posHigh         = posHigh;
     this._posLow          = posLow;
     this._colU8           = colU8;
@@ -37,14 +57,14 @@ class PointCloudPrimitive {
     this._upVecRef        = upVecRef;
     this._heightOffsetRef = heightOffsetRef;
     this.show             = true;
-    this._destroyed      = false;
-    this._cmd            = null;    // 지연 생성
-    this._va             = null;
-    this._sp             = null;
+    this._destroyed       = false;
+    this._cmd             = null;
+    this._va              = null;
+    this._sp              = null;
   }
 
   // PrimitiveCollection 이 매 프레임 호출
-  update(frameState) {
+  update(frameState: any): void {
     if (!this.show || this._destroyed) return;
     if (!this._cmd) {
       this._initGpu(frameState.context);
@@ -52,12 +72,12 @@ class PointCloudPrimitive {
     frameState.commandList.push(this._cmd);
   }
 
-  _initGpu(context) {
+  _initGpu(context: any): void {
     // ── 버텍스 버퍼 생성 ─────────────────────────────────────
-    const mkVBuf = (arr) => Cesium.Buffer.createVertexBuffer({
+    const mkVBuf = (arr: ArrayBufferView) => CesiumAny.Buffer.createVertexBuffer({
       context,
       typedArray: arr,
-      usage: Cesium.BufferUsage.STATIC_DRAW,
+      usage: CesiumAny.BufferUsage.STATIC_DRAW,
     });
 
     // ── 버텍스 배열 (VAO) ────────────────────────────────────
@@ -65,12 +85,12 @@ class PointCloudPrimitive {
     //   location 1 → position3DLow  (Float32 ×3)
     //   location 2 → color          (Uint8   ×4, normalized)
     //   location 3 → classification (Uint8   ×1, 정수값)
-    const va = new Cesium.VertexArray({
+    const va = new CesiumAny.VertexArray({
       context,
       attributes: [
         {
           index:                 0,
-          vertexBuffer:          mkVBuf(this._posHigh),
+          vertexBuffer:          mkVBuf(this._posHigh!),
           componentsPerAttribute: 3,
           componentDatatype:     Cesium.ComponentDatatype.FLOAT,
           offsetInBytes:         0,
@@ -78,7 +98,7 @@ class PointCloudPrimitive {
         },
         {
           index:                 1,
-          vertexBuffer:          mkVBuf(this._posLow),
+          vertexBuffer:          mkVBuf(this._posLow!),
           componentsPerAttribute: 3,
           componentDatatype:     Cesium.ComponentDatatype.FLOAT,
           offsetInBytes:         0,
@@ -86,7 +106,7 @@ class PointCloudPrimitive {
         },
         {
           index:                 2,
-          vertexBuffer:          mkVBuf(this._colU8),
+          vertexBuffer:          mkVBuf(this._colU8!),
           componentsPerAttribute: 4,
           componentDatatype:     Cesium.ComponentDatatype.UNSIGNED_BYTE,
           normalize:             true,
@@ -95,7 +115,7 @@ class PointCloudPrimitive {
         },
         {
           index:                 3,
-          vertexBuffer:          mkVBuf(this._cls),
+          vertexBuffer:          mkVBuf(this._cls!),
           componentsPerAttribute: 1,
           componentDatatype:     Cesium.ComponentDatatype.UNSIGNED_BYTE,
           normalize:             false,
@@ -106,12 +126,6 @@ class PointCloudPrimitive {
     });
 
     // ── 셰이더 ───────────────────────────────────────────────
-    //
-    // u_pixelSize: 슬라이더 조작 즉시 반영 (캐시 유지)
-    // u_classMask: 비트 N = 클래스 N 표시. -1이면 전체 표시.
-    //   cls >= 32인 점은 항상 표시 (ASPRS 예약 클래스).
-    //   short-circuit &&: cls < 32 가 false면 우변 비트 연산 실행 안 됨.
-    //
     const vs = `
 in vec3 position3DHigh;
 in vec3 position3DLow;
@@ -148,7 +162,7 @@ void main() {
     const upVecRef        = this._upVecRef;
     const heightOffsetRef = this._heightOffsetRef;
 
-    const sp = Cesium.ShaderProgram.fromCache({
+    const sp = CesiumAny.ShaderProgram.fromCache({
       context,
       vertexShaderSource:   vs,
       fragmentShaderSource: fs,
@@ -163,17 +177,17 @@ void main() {
     // ── DrawCommand ──────────────────────────────────────────
     this._va  = va;
     this._sp  = sp;
-    this._cmd = new Cesium.DrawCommand({
+    this._cmd = new CesiumAny.DrawCommand({
       vertexArray:    va,
       primitiveType:  Cesium.PrimitiveType.POINTS,
       shaderProgram:  sp,
-      renderState:    Cesium.RenderState.fromCache({
+      renderState:    CesiumAny.RenderState.fromCache({
         depthTest: { enabled: true },
         depthMask: true,
       }),
       boundingVolume: this._boundingSphere,
       count:          this._pointCount,
-      pass:           Cesium.Pass.OPAQUE,
+      pass:           CesiumAny.Pass.OPAQUE,
       modelMatrix:    Cesium.Matrix4.IDENTITY,
       uniformMap: {
         u_pixelSize:    () => pixelSizeRef.value,
@@ -190,9 +204,9 @@ void main() {
     this._cls     = null;
   }
 
-  isDestroyed() { return this._destroyed; }
+  isDestroyed(): boolean { return this._destroyed; }
 
-  destroy() {
+  destroy(): void {
     if (!this._destroyed) {
       if (this._va) this._va.destroy();
       if (this._sp) this._sp.destroy();
@@ -205,22 +219,21 @@ void main() {
 // ── loadNode ─────────────────────────────────────────────────
 /**
  * COPC 노드를 로드하여 PointCloudPrimitive를 반환합니다.
- *
- * @param {string}     url
- * @param {object}     copc        Copc.create() 반환값
- * @param {object}     nodeInfo    nodes[key]
- * @param {WorkerPool} pool
- * @param {string}     srcProj
- * @param {string}     projDef
- * @param {number}     geoidOffset
- * @param {{ value: number }} pixelSizeRef  공유 점 크기 ref
- * @param {{ value: number }} classMaskRef  공유 분류 마스크 ref
- * @param {number}     [zFactor=0.3048]
- * @param {{ value: Cesium.Cartesian3 }} [upVecRef=null]      공유 상향 벡터 ref
- * @param {{ value: number }}            [heightOffsetRef=null] 공유 고도 오프셋 ref
- * @returns {{ collection, pointCount, lastUsed, seenClasses }}
  */
-export async function loadNode(url, copc, nodeInfo, pool, srcProj, projDef, geoidOffset, pixelSizeRef, classMaskRef, zFactor = 0.3048, upVecRef = null, heightOffsetRef = null) {
+export async function loadNode(
+  url: string,
+  copc: Awaited<ReturnType<typeof Copc.create>>,
+  nodeInfo: Hierarchy.Node,
+  pool: WorkerPool,
+  srcProj: string,
+  projDef: string | null,
+  geoidOffset: number,
+  pixelSizeRef: Ref<number>,
+  classMaskRef: Ref<number>,
+  zFactor = 0.3048,
+  upVecRef: Ref<Cesium.Cartesian3> | null = null,
+  heightOffsetRef: Ref<number> | null = null,
+): Promise<NodeCacheEntry> {
   // ── 1. fetch + LAZ 파싱 ───────────────────────────────────
   const view = await Copc.loadPointDataView(url, copc, nodeInfo);
   const n    = view.pointCount;
@@ -229,18 +242,20 @@ export async function loadNode(url, copc, nodeInfo, pool, srcProj, projDef, geoi
   const getY = view.getter('Y');
   const getZ = view.getter('Z');
 
-  let getR, getG, getB;
+  let getR: ((i: number) => number) | undefined;
+  let getG: ((i: number) => number) | undefined;
+  let getB: ((i: number) => number) | undefined;
   try { getR = view.getter('Red');   } catch { /* RGB 없음 */ }
   try { getG = view.getter('Green'); } catch { /* RGB 없음 */ }
   try { getB = view.getter('Blue');  } catch { /* RGB 없음 */ }
   const hasRGB = !!(getR && getG && getB);
 
-  let getI;
+  let getI: ((i: number) => number) | undefined;
   if (!hasRGB) {
     try { getI = view.getter('Intensity'); } catch { /* Intensity도 없음 */ }
   }
 
-  let getCls;
+  let getCls: ((i: number) => number) | undefined;
   try { getCls = view.getter('Classification'); } catch { /* Classification 없음 */ }
 
   const xs   = new Float64Array(n);
@@ -249,12 +264,12 @@ export async function loadNode(url, copc, nodeInfo, pool, srcProj, projDef, geoi
   const rs   = new Float32Array(n);
   const gs   = new Float32Array(n);
   const bs   = new Float32Array(n);
-  const clsU8      = new Uint8Array(n);
-  const seenClasses = new Set();
+  const clsU8       = new Uint8Array(n);
+  const seenClasses = new Set<number>();
 
   for (let i = 0; i < n; i++) {
     xs[i] = getX(i); ys[i] = getY(i); zs[i] = getZ(i);
-    if (hasRGB) {
+    if (hasRGB && getR && getG && getB) {
       rs[i] = getR(i); gs[i] = getG(i); bs[i] = getB(i);
     } else if (getI) {
       rs[i] = gs[i] = bs[i] = getI(i);
@@ -268,7 +283,7 @@ export async function loadNode(url, copc, nodeInfo, pool, srcProj, projDef, geoi
 
   // ── 2. Worker: proj4 변환 + WGS84 Cartesian3 계산 ────────
   const { positions, colors, pointCount } = await pool.run(
-    { xs, ys, zs, rs, gs, bs, pointCount: n, srcProj, projDef, geoidOffset, zFactor, hasRGB },
+    { xs, ys, zs, rs, gs, bs, pointCount: n, srcProj, projDef, geoidOffset, zFactor, hasRGB } as Record<string, unknown>,
     [xs.buffer, ys.buffer, zs.buffer, rs.buffer, gs.buffer, bs.buffer],
   );
 
