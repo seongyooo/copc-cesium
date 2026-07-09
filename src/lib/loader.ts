@@ -72,7 +72,7 @@ class PointCloudPrimitive implements Renderable {
     frameState.commandList.push(this._cmd);
   }
 
-  _initGpu(context: any): void {
+  private _initGpu(context: any): void {
     // ── 버텍스 버퍼 생성 ─────────────────────────────────────
     const mkVBuf = (arr: ArrayBufferView) => CesiumAny.Buffer.createVertexBuffer({
       context,
@@ -283,7 +283,7 @@ export async function loadNode(
 
   // ── 2. Worker: proj4 변환 + WGS84 Cartesian3 계산 ────────
   const { positions, colors, pointCount } = await pool.run(
-    { xs, ys, zs, rs, gs, bs, pointCount: n, srcProj, projDef, geoidOffset, zFactor, hasRGB } as Record<string, unknown>,
+    { xs, ys, zs, rs, gs, bs, pointCount: n, srcProj, projDef, geoidOffset, zFactor, hasRGB },
     [xs.buffer, ys.buffer, zs.buffer, rs.buffer, gs.buffer, bs.buffer],
   );
 

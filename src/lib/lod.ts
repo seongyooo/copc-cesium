@@ -1,5 +1,4 @@
 import * as Cesium from 'cesium';
-import type { BoundingSphere, Camera, Scene, CullingVolume } from 'cesium';
 import proj4 from 'proj4';
 
 // B-4: distanceToDepth — BFS+SSE LoD로 교체되어 미사용, 삭제
@@ -36,7 +35,7 @@ export function getChildKeys(key: string): string[] {
  * SSE가 클수록 화면에서 크게 보임 → 자식 노드로 세분화가 필요함.
  * SSE > sseThreshold 이면 자식 확장, 이하이면 현재 노드를 리프로 사용.
  */
-export function screenSpaceError(sphere: BoundingSphere, camera: Camera, scene: Scene): number {
+export function screenSpaceError(sphere: Cesium.BoundingSphere, camera: Cesium.Camera, scene: Cesium.Scene): number {
   const dist = Cesium.Cartesian3.distance(camera.position, sphere.center);
   // 카메라가 구 안에 있으면 항상 확장
   if (dist < sphere.radius) return Infinity;
@@ -58,7 +57,7 @@ export function getNodeBoundingSphere(
   geoidOffset: number,
   zFactor = 0.3048,
   xyFactor = zFactor,
-): BoundingSphere {
+): Cesium.BoundingSphere {
   const [level, xi, yi, zi] = key.split('-').map(Number);
   const nodeHalfSize = rootHalfSize / Math.pow(2, level);
 
@@ -80,7 +79,7 @@ export function getNodeBoundingSphere(
 }
 
 /** 현재 카메라의 CullingVolume 반환 */
-export function getCullingVolume(camera: Camera): CullingVolume {
+export function getCullingVolume(camera: Cesium.Camera): Cesium.CullingVolume {
   return camera.frustum.computeCullingVolume(
     camera.position,
     camera.direction,
@@ -89,6 +88,6 @@ export function getCullingVolume(camera: Camera): CullingVolume {
 }
 
 /** BoundingSphere가 CullingVolume 안에 있는지 판정 */
-export function isInFrustum(sphere: BoundingSphere, cullingVolume: CullingVolume): boolean {
+export function isInFrustum(sphere: Cesium.BoundingSphere, cullingVolume: Cesium.CullingVolume): boolean {
   return cullingVolume.computeVisibility(sphere) !== Cesium.Intersect.OUTSIDE;
 }

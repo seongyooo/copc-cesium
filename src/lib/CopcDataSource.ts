@@ -104,7 +104,7 @@ async function detectCrsFromWkt(wkt: string | undefined, url: string): Promise<C
   return null;
 }
 
-type InternalCopcOptions = Required<CopcOptions>;
+type InternalCopcOptions = Omit<Required<CopcOptions>, 'xyFactor'> & { xyFactor?: number };
 
 /**
  * CopcDataSource
@@ -159,7 +159,7 @@ export class CopcDataSource {
       zFactor:         0.3048,
       xyFactor:        undefined,
       ...options,
-    } as InternalCopcOptions;
+    };
 
     // 메인 스레드용 proj4 정의 등록
     if (this._opts.proj !== 'EPSG:4326' && this._opts.projDef) {
@@ -282,48 +282,6 @@ export class CopcDataSource {
 
   // ── 내부 유틸 ───────────────────────────────────────────────
 
-  private async _autoDetectGeoidOffset(): Promise<void> {
-    try {
-      const [minx, miny, minz, maxx, maxy] = this._copc.info.cube;
-      const cx = (minx + maxx) / 2;
-      const cy = (miny + maxy) / 2;
-
-      const toWgs84 = (x: number, y: number): [number, number] => {
-        if (this._opts.proj === 'EPSG:4326' || !this._opts.projDef) return [x, y];
-        return proj4(this._opts.proj, 'EPSG:4326', [x, y]);
-      };
-
-      const pts = [
-        [cx,   cy  ],
-        [cx,   miny],
-        [cx,   maxy],
-        [minx, cy  ],
-        [maxx, cy  ],
-      ].map(([x, y]) => {
-        const [lon, lat] = toWgs84(x, y);
-        return Cesium.Cartographic.fromDegrees(lon, lat);
-      });
-
-      const samples = await Cesium.sampleTerrainMostDetailed(
-        this._viewer.terrainProvider, pts,
-      );
-      const minTerrainH = Math.min(...samples.map(s => s.height ?? 0));
-
-      const zFactor  = this._opts.zFactor ?? 1.0;
-      const groundZ  = minz * zFactor;
-      const offset   = minTerrainH - groundZ;
-
-      if (Math.abs(offset) < 2000) {
-        this._opts.geoidOffset = offset;
-        console.debug(`[CopcDataSource] 고도 자동 보정: ${offset.toFixed(1)}m`);
-      } else {
-        console.warn(`[CopcDataSource] 고도 자동 보정 범위 초과(${offset.toFixed(1)}m), 스킵`);
-      }
-    } catch (e) {
-      console.warn('[CopcDataSource] 고도 자동 보정 실패:', (e as Error).message);
-    }
-  }
-
   private _sphere(key: string): Cesium.BoundingSphere {
     let s = this._sphereCache.get(key);
     if (!s) {
@@ -378,13 +336,14 @@ export class CopcDataSource {
     while (qHead < queue.length) {
       const key = queue[qHead++];
 
-      if (!this._nodes[key]) continue;
+      const nodeInfo = this._nodes[key];
+      if (!nodeInfo) continue;
 
       const sphere = getSphere(key);
 
       if (!isInFrustum(sphere, cv)) { culled++; continue; }
 
-      if (this._nodes[key]!.pointCount === 0) {
+      if (nodeInfo.pointCount === 0) {
         getChildKeys(key)
           .filter(k => this._nodes[k])
           .forEach(k => queue.push(k));
@@ -466,8 +425,11 @@ export class CopcDataSource {
       const makeLoadTask = (key: string) => async (): Promise<void> => {
         if (gen !== this._loadGen) return;
 
+        const nodeInfo = this._nodes[key];
+        if (!nodeInfo) return;
+
         const data = await loadNode(
-          this._url, this._copc, this._nodes[key]!, this._pool,
+          this._url, this._copc, nodeInfo, this._pool,
           this._opts.proj, this._opts.projDef,
           this._opts.geoidOffset, this._pixelSizeRef, this._classMaskRef,
           this._opts.zFactor ?? 0.3048,
@@ -520,8 +482,7 @@ export class CopcDataSource {
         }
 
         const visiblePoints = [...targetSet]
-          .filter(k => this._cache.has(k))
-          .reduce((s, k) => s + this._cache.get(k)!.pointCount, 0);
+          .reduce((s, k) => s + (this._cache.get(k)?.pointCount ?? 0), 0);
 
         this._emit({ depth: maxDepth, visible: visibleKeys.length, culled,
           loading: 0, points: visiblePoints, cached: this._cache.size, height });

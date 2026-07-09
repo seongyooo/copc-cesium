@@ -1,5 +1,3 @@
-import type { Cartesian3 } from 'cesium';
-
 export interface Ref<T> { value: T }
 
 export interface CopcOptions {

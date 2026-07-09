@@ -11,6 +11,11 @@ export type WorkerResult = {
   pointCount: number;
 };
 
+interface WorkerResponse extends Partial<WorkerResult> {
+  id: string;
+  error?: string;
+}
+
 interface PendingEntry {
   resolve: (val: WorkerResult) => void;
   reject: (err: Error) => void;
@@ -73,25 +78,18 @@ export class WorkerPool {
    * @param transfer      Transferable 객체 목록
    * @param timeoutMs     응답 타임아웃 (ms). 초과 시 reject
    */
-  run(msg: Record<string, unknown>, transfer: Transferable[] = [], timeoutMs = 30_000): Promise<WorkerResult> {
+  run<T extends Record<string, unknown>>(msg: T, transfer: Transferable[] = [], timeoutMs = 30_000): Promise<WorkerResult> {
     const id = String(++this._counter);
 
     return new Promise((resolve, reject) => {
       let timerId: ReturnType<typeof setTimeout>;
       let settled = false;
 
-      const settle = (fn: (val: WorkerResult) => void, val: WorkerResult): void => {
+      const settle = (fn: ((val: WorkerResult) => void) | ((err: Error) => void), val: WorkerResult | Error): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timerId);
-        fn(val);
-      };
-
-      const settleReject = (fn: (err: Error) => void, err: Error): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timerId);
-        fn(err);
+        (fn as (v: WorkerResult | Error) => void)(val);
       };
 
       this._queue.push({
@@ -99,7 +97,7 @@ export class WorkerPool {
         msg: { ...msg, id },
         transfer,
         resolve: (val) => settle(resolve, val),
-        reject:  (err) => settleReject(reject, err),
+        reject:  (err) => settle(reject, err),
       });
       this._flush();
 
@@ -112,7 +110,7 @@ export class WorkerPool {
           const qi = this._queue.findIndex(q => q.id === id);
           if (qi !== -1) this._queue.splice(qi, 1);
         }
-        settleReject(reject, new Error(`Worker 응답 타임아웃 (${timeoutMs}ms)`));
+        settle(reject, new Error(`Worker 응답 타임아웃 (${timeoutMs}ms)`));
       }, timeoutMs);
     });
   }
@@ -142,15 +140,15 @@ export class WorkerPool {
     }
   }
 
-  private _onResult({ id, error, ...data }: Record<string, unknown>, worker: Worker): void {
+  private _onResult({ id, error, ...data }: WorkerResponse, worker: Worker): void {
     // 타임아웃으로 pending이 제거된 경우에도 워커는 항상 idle로 복귀
     this._idle.push(worker);
     this._flush();
 
-    const pending = this._pending.get(id as string);
+    const pending = this._pending.get(id);
     if (!pending) return; // 이미 타임아웃 처리됨
-    this._pending.delete(id as string);
-    if (error) pending.reject(new Error(error as string));
-    else       pending.resolve(data as unknown as WorkerResult);
+    this._pending.delete(id);
+    if (error) pending.reject(new Error(error));
+    else       pending.resolve(data as WorkerResult);
   }
 }
