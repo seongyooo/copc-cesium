@@ -116,7 +116,7 @@ export function getNodeBoundingSphere(key, rootCenter, rootHalfSize, lonLatFn, g
 |---|---|---|
 | `Cesium.Buffer` | `loader.js:54` | `Cesium.Buffer.createVertexBuffer`는 공개 API이지만 `DrawCommand`, `VertexArray`, `ShaderProgram`, `RenderState`, `Pass` 모두 Cesium의 **비공개 내부 렌더링 API**입니다. Cesium 메이저 버전 업그레이드 시 경고 없이 제거·변경될 수 있습니다. |
 | `Cesium.destroyObject` | `loader.js:165` | 마찬가지로 내부 유틸리티 함수입니다. |
-| `camera.percentageChanged` | `CopcDataSource.js:586` | 공개 API이나 값을 직접 덮어씌우는 방식(`= 0.01`)은 Viewer를 공유할 경우 다른 코드와 충돌합니다. |
+| ~~`camera.percentageChanged`~~ | ~~`CopcDataSource.js:586`~~ | **해결됨** — `camera.changed` 기반 LoD 갱신이 `scene.postUpdate` 기반으로 전환되어 `percentageChanged` 설정 코드가 제거됨. |
 
 ---
 
@@ -133,26 +133,12 @@ export function getNodeBoundingSphere(key, rootCenter, rootHalfSize, lonLatFn, g
 
 ### 3-3. 중복 코드 / 복사-붙여넣기 패턴
 
-**① `toLoad.sort` 중복 — `CopcDataSource.js`**
+**① ~~`toLoad.sort` 중복~~ — `CopcDataSource.js` — ✅ 해결됨**
 
-`_selectNodesBFS`(411행)와 `_updateLoD`의 `toLoad.sort`(473행) 두 곳에서
-"카메라 방향 기준 dot product 정렬" 로직이 거의 동일하게 반복됩니다.
+~~`_selectNodesBFS`(411행)와 `_updateLoD`의 `toLoad.sort`(473행) 두 곳에서
+"카메라 방향 기준 dot product 정렬" 로직이 거의 동일하게 반복됩니다.~~
 
-```js
-// 두 곳에 동일한 패턴
-Cesium.Cartesian3.subtract(getSphere(x).center, camPos, scratch);
-Cesium.Cartesian3.normalize(scratch, scratch);
-const dot = Cesium.Cartesian3.dot(scratch, camDir);
-```
-
-헬퍼로 추출하면 됩니다:
-```js
-function dotToCamera(sphere, camPos, camDir, scratch) {
-  Cesium.Cartesian3.subtract(sphere.center, camPos, scratch);
-  Cesium.Cartesian3.normalize(scratch, scratch);
-  return Cesium.Cartesian3.dot(scratch, camDir);
-}
-```
+`toLoad`는 `visibleKeys`(이미 정렬 완료)를 순서대로 순회하며 캐시 미스만 걸러낸 배열이므로 이미 같은 순서를 유지합니다. `toLoad.sort()`는 중복 연산임이 확인되어 제거되었습니다.
 
 **② `getSphere` 클로저 중복 — `CopcDataSource.js`**
 
@@ -164,26 +150,24 @@ function dotToCamera(sphere, camPos, camDir, scratch) {
 
 ---
 
-### 3-4. 런타임 외부 네트워크 의존
+### 3-4. ~~런타임 외부 네트워크 의존~~ — ✅ 해결됨
 
-```js
-// CopcDataSource.js:116
-const res = await fetch(`https://epsg.io/${epsgCode}.proj4`);
-```
+~~`epsg.io`에 실시간 HTTP 요청~~
 
-WKT CRS 자동 감지 실패 시 `epsg.io`에 실시간 HTTP 요청합니다.
-- 오프라인·에어갭 환경에서 작동하지 않습니다.
-- 해당 서비스 장애 시 CRS 감지가 무음 실패(fallback to EPSG:4326)합니다.
-- CORS 정책 이슈가 발생할 수 있습니다.
+`src/lib/epsg-defs.js`에 자주 쓰이는 EPSG 코드의 proj4 정의를 번들에 내장했습니다. WKT CRS 자동 감지 시 다음 순서로 로컬에서 처리합니다:
 
-**완화 방안:** 자주 쓰는 EPSG 코드(2992, 6419, 32610 등)의 proj4 정의를 번들에 내장하고, epsg.io 요청은 마지막 수단으로 남깁니다.
+1. WKT1 PROJCS 블록을 proj4.js에 직접 등록 시도
+2. 실패 시 WKT에서 EPSG 코드 추출 → `epsg-defs.js` 로컬 테이블 조회
+3. 테이블 미등록 시 경고 후 EPSG:4326 fallback
+
+외부 네트워크 요청이 완전히 제거되어 오프라인 환경에서도 정상 동작합니다.
 
 ---
 
 ### 3-5. 하드코딩된 기본값
 
-- `zFactor = 0.3048`(feet 기본값)이 `loader.js`, `lod.js`, `CopcDataSource.js`, `worker.js` 네 곳에 흩어져 있습니다.
-- GLSL 셰이더 문자열이 `loader.js` 내 `_initGpu`에 인라인으로 하드코딩되어 있습니다(`gl_PointSize = ${pxSz.toFixed(1)}`). `pixelSize` 변경 시 셰이더를 재컴파일하는 방법이 없습니다.
+- `zFactor = 0.3048`(feet 기본값)이 `lod.js`, `CopcDataSource.js`, `worker.js` 등에 흩어져 있습니다. WKT 자동 감지가 성공하면 덮어씌워지므로 실제 영향은 줄었으나 상수 중복은 여전히 존재합니다.
+- ~~GLSL 셰이더의 `gl_PointSize = ${pxSz.toFixed(1)}` 템플릿 리터럴 하드코딩~~ — **해결됨**: `u_pixelSize` 유니폼으로 전환되어 셰이더 재컴파일 없이 슬라이더로 실시간 점 크기 변경이 가능합니다.
 
 ---
 

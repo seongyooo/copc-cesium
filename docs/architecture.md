@@ -28,15 +28,18 @@
 ```
 CopcDataSource.load(url, viewer, opts)
   └─ _init(url)
-       ├─ Copc.create(url)            // HTTP HEAD + 헤더 파싱
-       ├─ Copc.loadHierarchyPage()    // 전체 노드 트리 로드
+       ├─ Copc.create(url)             // HTTP HEAD + 헤더 파싱
+       ├─ detectCrsFromWkt()           // WKT VLR → proj/zFactor 자동 감지
+       ├─ Copc.loadHierarchyPage()     // 전체 노드 트리 로드
        ├─ camera.flyToBoundingSphere() // 초기 시점 이동
-       ├─ _updateLoD()               // 첫 LoD 계산 + 노드 로드
-       └─ _startListening()          // 카메라 이벤트 등록
+       ├─ _updateLoD()                // 첫 LoD 계산 + 노드 로드
+       └─ _startListening()           // scene.postUpdate + camera.moveEnd 등록
 
-카메라 움직임 감지
-  ├─ [빠른 경로] _updateVisibility()  // _lastTargetSet 범위만 frustum on/off
-  └─ [느린 경로] setTimeout → _updateLoD()  // BFS 재계산 + 노드 로드/제거
+이벤트 처리
+  ├─ scene.postUpdate (매 프레임)
+  │   ├─ [즉시] _updateVisibility()   // _lastTargetSet 범위만 frustum on/off
+  │   └─ [200ms 간격] _updateLoD()    // BFS 재계산 + 노드 로드/제거
+  └─ camera.moveEnd → _updateLoD()    // 카메라 정지 시 즉시 최종 갱신
 ```
 
 `_updateLoD` 내부 단계:
@@ -44,11 +47,11 @@ CopcDataSource.load(url, viewer, opts)
 ```
 1. _selectNodesBFS()     → BFS 탐색, SSE 계산, 중심 우선 정렬
 2. 캐시 히트 확인        → 씬에 없으면 container.add, show=true
-3. toLoad 정렬           → sphereMap 재사용, 중심 방향 우선
-4. _runConcurrent()      → 세대 확인 후 loadNode, 결과 씬에 추가
-5. 비대상 노드 제거      → container.remove (show=false 아님)
-6. _evict()              → LRU 순 캐시 정리, collection.destroy()
-7. 프러스텀 최종 동기화  → targetSet 내에서 show 재확인
+3. _runConcurrent()      → 세대 확인 후 loadNode, 결과 씬에 추가
+                           (toLoad는 visibleKeys 순서 그대로 — 재정렬 불필요)
+4. 비대상 노드 제거      → container.remove (show=false 아님)
+5. _evict()              → LRU 순 캐시 정리, collection.destroy()
+6. 프러스텀 최종 동기화  → targetSet 내에서 show 재확인
 ```
 
 ---
@@ -99,32 +102,36 @@ SSE = (radius / dist) × (screenHeight / (2 × tan(fovY / 2)))
 카메라가 움직일 때 두 가지 경로가 분리되어 실행됩니다.
 
 ```
-camera.changed 이벤트
+scene.postUpdate (매 프레임 호출)
   │
-  ├─ [즉시] _updateVisibility()   ← 빠른 경로
+  ├─ [즉시] !isUpdating → _updateVisibility()   ← 빠른 경로
   │         _lastTargetSet 범위 내에서만 frustum show/hide
   │
-  └─ [debounceMs 후] _updateLoD() ← 느린 경로
-                     BFS 재계산 + 네트워크 요청
+  └─ [200ms 간격] → _updateLoD()               ← 느린 경로
+                    BFS 재계산 + 네트워크 요청
 
-camera.moveEnd 이벤트 (동일 handler)
+camera.moveEnd 이벤트
   │
-  └─ Ctrl+드래그 등 방향만 변경되는 경우 감지 (위치 변화 없어 changed 미발동)
-      → _updateVisibility() + debounce → _updateLoD()
+  └─ 카메라 완전 정지 시 즉시 _updateLoD() 실행
+      (200ms 인터벌을 기다리지 않고 최종 고품질 갱신 보장)
 ```
 
-### 빠른 경로가 필요한 이유
+### `scene.postUpdate` 기반으로 전환한 이유
 
-카메라가 패닝/회전할 때마다 BFS + 네트워크 요청을 실행하면 과부하가 발생합니다. 빠른 경로는 이미 로드된 노드들만 보이는지 여부를 빠르게 갱신합니다.
+초기 구현은 `camera.changed`(위치 변화량 임계치 기반)를 사용했습니다. 문제:
+- Ctrl+드래그 등 **방향만 바뀌는** 소폭 조작에서 `changed`가 발동되지 않아 frustum 갱신 누락
+- 위치 임계치(~1%)를 낮춰도 소폭 회전(~8° 임계치)은 여전히 누락
+
+`scene.postUpdate`는 매 프레임 호출되어 모든 카메라 변화를 빠짐없이 포착합니다. 대신 느린 경로(`_updateLoD`)는 200ms 간격으로 제한해 과부하를 방지합니다.
 
 ### `camera.moveEnd` 추가 이유
 
-`camera.changed`는 카메라 **위치** 변화량 기반으로 발동합니다. Ctrl+드래그로 방향(direction)만 바꾸는 경우 위치가 고정되므로 `changed`가 발동되지 않아 LoD 갱신이 누락됩니다. `camera.moveEnd`를 동일 handler로 함께 구독해 이 문제를 해결합니다.
+200ms 인터벌은 카메라가 정지된 후에도 최대 200ms 지연이 발생합니다. `camera.moveEnd`를 구독해 정지 즉시 `_updateLoD()`를 실행하면 정지 후 바로 고품질 렌더가 나타납니다.
 
 ```js
 // _startListening() 내부
-this._removeCameraListener  = this._viewer.camera.changed.addEventListener(handler);
-this._removeMoveEndListener = this._viewer.camera.moveEnd.addEventListener(handler);
+this._removePostUpdateListener = this._viewer.scene.postUpdate.addEventListener(handler);
+this._removeMoveEndListener    = this._viewer.camera.moveEnd.addEventListener(handler);
 ```
 
 `destroy()`에서 두 리스너를 모두 해제합니다.
@@ -265,7 +272,7 @@ async _runConcurrent(tasks) {
 
 ---
 
-## 7. BoundingSphere 메모이제이션 (sphereMap)
+## 7. BoundingSphere 캐싱 — 두 단계
 
 ### 문제
 
@@ -278,7 +285,7 @@ proj4 호출당 ~0.1ms → 140ms 메인 스레드 블로킹
 
 줌 레벨 전환 시마다 이 블로킹이 발생해 렉이 느껴졌습니다.
 
-### 해결: sphereMap 캐시
+### 해결 1: sphereMap (BFS 호출 내 단기 캐시)
 
 ```js
 const sphereMap = new Map();
@@ -289,9 +296,24 @@ const getSphere = (key) => {
 };
 ```
 
-BFS 루프에서 처음 계산된 BoundingSphere를 Map에 저장하고, sort와 `_updateLoD`의 `toLoad.sort`에서 O(1)로 재사용합니다. proj4 호출이 노드당 1회로 줄어듭니다.
+BFS 루프에서 처음 계산된 BoundingSphere를 Map에 저장하고, sort에서 O(1)로 재사용합니다. `sphereMap`은 `_selectNodesBFS`의 반환값에 포함되어 `_updateLoD`로 전달됩니다.
 
-`sphereMap`은 `_selectNodesBFS`의 반환값에 포함되어 `_updateLoD`로 전달됩니다.
+### 해결 2: `_sphereCache` (영구 캐시)
+
+노드 위치는 데이터가 로드된 이후 절대 변하지 않습니다. `_sphere()`는 이제 `_sphereCache`(클래스 필드 Map)를 확인해, 한 번 계산한 BoundingSphere를 데이터소스 수명 동안 영구 재사용합니다.
+
+```js
+_sphere(key) {
+  let s = this._sphereCache.get(key);
+  if (!s) {
+    s = getNodeBoundingSphere(...);
+    this._sphereCache.set(key, s);
+  }
+  return s;
+}
+```
+
+200ms마다 실행되는 BFS에서 proj4 호출과 `new BoundingSphere()` 객체 생성이 완전히 제거됩니다.
 
 ---
 
@@ -315,6 +337,10 @@ visibleKeys.sort((a, b) => {
 내적이 1에 가까울수록 카메라가 정면으로 바라보는 노드 → 먼저 로드됩니다.
 
 가장자리 노드는 잘라내지 않고 **우선순위만 뒤로 밀립니다**. `_runConcurrent`의 concurrency 제한(기본 5)과 함께 동작해, 중심 5개가 먼저 로드 완료된 후 가장자리 노드들이 순차 로드됩니다.
+
+### `toLoad` 재정렬 불필요
+
+`toLoad`(캐시 미스 노드 목록)는 `visibleKeys`를 순서대로 순회하며 캐시 미스만 걸러낸 배열입니다. `visibleKeys`가 이미 dot product 기준으로 정렬되어 있으므로 `toLoad`도 같은 순서를 유지합니다. 한때 `toLoad.sort()`를 별도로 수행했으나, 동일한 정렬이 반복되는 중복 연산임이 확인되어 제거되었습니다.
 
 ---
 
@@ -529,14 +555,22 @@ SSE_root = (radius / (4 × radius)) × (screenHeight / (2 × tan(fovY/2)))
 | `_opts` | `object` | 병합된 옵션 |
 | `_pool` | `WorkerPool` | Worker 풀 |
 | `_container` | `PrimitiveCollection` | `destroyPrimitives:false` 전용 컨테이너 |
+| `_sphereCache` | `Map<key, BoundingSphere>` | 노드 BoundingSphere 영구 캐시 (위치 불변) |
+| `_scratchA` | `Cesium.Cartesian3` | BFS 정렬 비교자 scratch A (재사용) |
+| `_scratchB` | `Cesium.Cartesian3` | BFS 정렬 비교자 scratch B (재사용) |
 | `_cache` | `Map<key, data>` | 로드된 노드 LRU 캐시 |
 | `_inScene` | `Set<key>` | 현재 `_container`에 추가된 키 집합 |
 | `_lastTargetSet` | `Set<key>` | 마지막 LoD 선택 결과 (빠른 경로용) |
+| `_lastSphereMap` | `Map<key, BoundingSphere>` | 빠른 경로 proj4 재호출 방지용 단기 캐시 |
 | `_isUpdating` | `boolean` | `_updateLoD` 실행 중 플래그 |
 | `_pendingUpdate` | `boolean` | 로딩 중 카메라 이동 → 완료 후 재실행 예약 |
-| `_debounceTimer` | `number` | debounce setTimeout ID |
 | `_loadGen` | `number` | 로드 세대 번호 (줌아웃 시 증가) |
-| `_removeCameraListener` | `function` | `camera.changed` 이벤트 해제 함수 |
+| `_pixelSizeRef` | `{ value: number }` | 공유 점 크기 ref (슬라이더 연동) |
+| `_classMaskRef` | `{ value: number }` | 공유 분류 마스크 ref (필터 연동) |
+| `_upVecRef` | `{ value: Cartesian3 }` | 공유 상향 벡터 ref (고도 보정용) |
+| `_heightOffsetRef` | `{ value: number }` | 공유 고도 오프셋 ref (셰이더 즉시 반영) |
+| `_seenClasses` | `Set<number>` | 로드된 노드에서 발견된 ASPRS 분류값 집합 |
+| `_removePostUpdateListener` | `function` | `scene.postUpdate` 이벤트 해제 함수 |
 | `_removeMoveEndListener` | `function` | `camera.moveEnd` 이벤트 해제 함수 |
 | `_url` | `string` | COPC 파일 URL |
 | `_copc` | `object` | `Copc.create()` 반환값 |
@@ -551,15 +585,17 @@ SSE_root = (radius / (4 × radius)) × (screenHeight / (2 × tan(fovY/2)))
 
 | 옵션 | 기본값 | 설명 |
 |---|---|---|
-| `proj` | `'EPSG:4326'` | COPC 데이터 좌표계 |
-| `projDef` | `null` | proj4 정의 문자열 (proj ≠ 4326일 때 필수) |
+| `proj` | `'EPSG:4326'` | COPC 데이터 좌표계 (WKT VLR 자동 감지 시 덮어씌워짐) |
+| `projDef` | `null` | proj4 정의 문자열 (지정 시 WKT 자동 감지 스킵) |
 | `geoidOffset` | `0` | 지오이드 보정값 (m) |
+| `zFactor` | `0.3048` | Z 단위 → 미터 계수 (WKT 자동 감지 시 덮어씌워짐) |
 | `concurrency` | `5` | 동시 노드 로드 수 / Worker 풀 크기 |
-| `debounceMs` | `300` | 카메라 정지 후 LoD 갱신 대기 시간 (ms) |
-| `maxCacheNodes` | `40` | LRU 캐시 최대 노드 수 |
-| `maxVisibleNodes` | `100` | BFS 최대 후보 노드 수 (OOM 방지 상한) |
+| `maxCacheNodes` | `150` | LRU 캐시 최대 노드 수 (maxVisibleNodes보다 크게 유지) |
+| `maxVisibleNodes` | `100` | BFS 최대 렌더링 노드 수 (OOM 방지 상한) |
 | `pixelSize` | `2` | 점 크기 (px) |
 | `sseThreshold` | `250` | BFS 확장 임계값 (px). 낮을수록 세밀, 높을수록 성능 우선 |
+
+> **제거된 옵션:** `debounceMs` — `scene.postUpdate` 기반 200ms 인터벌로 대체됨.
 
 ### 성능 튜닝 가이드
 
@@ -568,7 +604,7 @@ SSE_root = (radius / (4 × radius)) × (screenHeight / (2 × tan(fovY/2)))
 {
   sseThreshold:    400,   // 덜 세밀하게
   maxVisibleNodes: 50,    // BFS 후보 제한
-  maxCacheNodes:   20,    // GPU 메모리 절약
+  maxCacheNodes:   80,    // maxVisibleNodes보다 크게 유지
   concurrency:     3,     // 동시 로드 감소
 }
 
@@ -576,7 +612,7 @@ SSE_root = (radius / (4 × radius)) × (screenHeight / (2 × tan(fovY/2)))
 {
   sseThreshold:    100,   // 더 세밀하게
   maxVisibleNodes: 150,
-  maxCacheNodes:   80,
+  maxCacheNodes:   200,
   concurrency:     8,
 }
 ```

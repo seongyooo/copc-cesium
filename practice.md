@@ -374,6 +374,7 @@ function isNodeInFrustum(boundingSphere) {
 ```
 main()
   ├─ Copc.create()            → 헤더 + info VLR (Range Request ~589B)
+  ├─ detectCrsFromWkt()       → WKT VLR에서 proj/zFactor 자동 감지
   ├─ Copc.loadHierarchyPage() → 노드 키 맵 (278개, 깊이 0~5)
   ├─ maxDepth = 5 (동적 계산)
   ├─ camera.flyToBoundingSphere() → 초기 시점 이동
@@ -386,9 +387,11 @@ main()
        └─ 캐시 미스 → loadNode() → PointCloudPrimitive 생성 (GPU 지연 초기화)
             (동시 5개, _runConcurrent 제한)
 
-camera.changed  → [빠른 경로] _updateVisibility() + debounce → _updateLoD()
-camera.moveEnd  → [빠른 경로] _updateVisibility() + debounce → _updateLoD()
-                   (Ctrl+드래그 방향 변경 감지용)
+scene.postUpdate (매 프레임)
+  ├─ [즉시] _updateVisibility()    → _lastTargetSet 내 frustum show/hide
+  └─ [200ms 간격] _updateLoD()     → BFS 재계산 + 새 노드 로드
+
+camera.moveEnd  → _updateLoD() 즉시 실행 (정지 후 200ms 대기 없이 최종 갱신)
 ```
 
 ---
