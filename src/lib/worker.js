@@ -47,10 +47,13 @@ self.onmessage = ({ data }) => {
       _registeredProjs.add(srcProj);
     }
 
-    // ── proj4 설정 검증 (첫 포인트로 빠른 실패) ─────────────
+    // ── proj4 변환 객체 생성 (루프 밖에서 한 번만 — PERF) ──────
+    // 3인수 proj4(src,dst,pt) 는 내부에서 매번 변환 객체를 생성하므로
+    // 미리 만들어 두면 포인트 수×CRS 파싱 오버헤드를 제거할 수 있다.
     const needsProj = srcProj !== 'EPSG:4326'; // B-6: 4326이면 항등변환이므로 스킵
+    const converter = needsProj ? proj4(srcProj, 'EPSG:4326') : null;
     if (needsProj && pointCount > 0) {
-      const [testLon, testLat] = proj4(srcProj, 'EPSG:4326', [xs[0], ys[0]]);
+      const [testLon, testLat] = converter.forward([xs[0], ys[0]]);
       if (!isFinite(testLon) || !isFinite(testLat)) {
         throw new Error(
           `proj4 변환 실패 (NaN): srcProj=${srcProj}, x=${xs[0]}, y=${ys[0]}. ` +
@@ -79,7 +82,7 @@ self.onmessage = ({ data }) => {
       // B-6: EPSG:4326이면 proj4 호출 스킵 (항등변환)
       let lon, lat;
       if (needsProj) {
-        [lon, lat] = proj4(srcProj, 'EPSG:4326', [xs[i], ys[i]]);
+        [lon, lat] = converter.forward([xs[i], ys[i]]);
       } else {
         lon = xs[i];
         lat = ys[i];

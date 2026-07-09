@@ -41,6 +41,14 @@ const PRESETS = {
     label: 'San Diego 2005',
     url:   '/sandiego.copc.laz',
   },
+  saltcreek: {
+    label:       'Salt Creek SfM (RGB)',
+    url:         '/sfm_saltcreek.copc.laz',
+    proj:        'EPSG:32612',
+    projDef:     '+proj=utm +zone=12 +datum=WGS84 +units=m +no_defs',
+    geoidOffset: 0,
+    zFactor:     1.0,
+  },
 };
 
 // ── UI 요소 ────────────────────────────────────────────────
@@ -246,6 +254,7 @@ async function loadCopc(url, opts = {}) {
       proj:          opts.proj        ?? 'EPSG:4326',
       projDef:       opts.projDef     ?? null,
       geoidOffset:   opts.geoidOffset ?? 0,
+      zFactor:       opts.zFactor     ?? 0.3048,
       concurrency:   5,
       maxCacheNodes: 150, // B-5: maxVisibleNodes(100)보다 크게 유지해야 eviction 동작
       pixelSize:     parseFloat(pixelSizeSlider.value),

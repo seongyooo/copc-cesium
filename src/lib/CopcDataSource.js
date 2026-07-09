@@ -189,6 +189,11 @@ export class CopcDataSource {
     this._container = new Cesium.PrimitiveCollection({ destroyPrimitives: false });
     viewer.scene.primitives.add(this._container);
 
+    // key → BoundingSphere (영구 캐시, 노드 위치는 불변)
+    this._sphereCache  = new Map();
+    // BFS 정렬 비교자용 scratch (매 호출 신규 할당 방지)
+    this._scratchA     = new Cesium.Cartesian3();
+    this._scratchB     = new Cesium.Cartesian3();
     // key → { collection, pointCount, lastUsed }
     this._cache        = new Map();
     // 현재 _container에 추가된 노드 키 집합.
@@ -197,7 +202,6 @@ export class CopcDataSource {
     this._lastTargetSet = new Set();
     this._isUpdating   = false;
     this._pendingUpdate = false;
-    this._removeCameraListener = null;
     // 카메라가 움직일 때마다 증가. loadNode 완료 후 이 값이 바뀌었으면
     // 결과를 버려 구형 시점의 노드가 씬에 추가되는 것을 막는다.
     this._loadGen = 0;
@@ -210,9 +214,11 @@ export class CopcDataSource {
     this._upVecRef        = { value: new Cesium.Cartesian3(0, 0, 1) };
     this._heightOffsetRef = { value: 0 };
 
-    this._onProgress    = null;
-    this._destroyed     = false; // A-3: 이중 호출·재진입 방지
-    this._lastSphereMap = null;  // C-1: _updateVisibility proj4 재호출 방지
+    this._onProgress              = null;
+    this._destroyed               = false; // A-3: 이중 호출·재진입 방지
+    this._lastSphereMap           = null;  // C-1: _updateVisibility proj4 재호출 방지
+    this._removePostUpdateListener = null;
+    this._removeMoveEndListener    = null;
   }
 
   // ── 정적 팩토리 ─────────────────────────────────────────────
@@ -357,12 +363,18 @@ export class CopcDataSource {
   }
 
   _sphere(key) {
-    return getNodeBoundingSphere(
-      key, this._rootCenter, this._rootHalfSize,
-      this._opts.proj, this._opts.geoidOffset,
-      this._opts.zFactor  ?? 0.3048,
-      this._opts.xyFactor ?? (this._opts.zFactor ?? 0.3048),
-    );
+    // PERF: BoundingSphere는 노드 위치가 불변이므로 영구 캐싱
+    let s = this._sphereCache.get(key);
+    if (!s) {
+      s = getNodeBoundingSphere(
+        key, this._rootCenter, this._rootHalfSize,
+        this._opts.proj, this._opts.geoidOffset,
+        this._opts.zFactor  ?? 0.3048,
+        this._opts.xyFactor ?? (this._opts.zFactor ?? 0.3048),
+      );
+      this._sphereCache.set(key, s);
+    }
+    return s;
   }
 
   // ── 빠른 경로: LoD 선택 결과 내에서 frustum show/hide만 갱신 ──
@@ -417,9 +429,10 @@ export class CopcDataSource {
     let   culled      = 0;
     let   maxDepth    = 0; // C-2: BFS 루프 내에서 직접 추적 (Math.max 스프레드 제거)
     const queue       = ['0-0-0-0'];
+    let   qHead       = 0; // PERF: shift() O(n) 대신 인덱스 포인터로 O(1) dequeue
 
-    while (queue.length > 0) {
-      const key = queue.shift();
+    while (qHead < queue.length) {
+      const key = queue[qHead++];
 
       // 계층에 없는 노드는 스킵
       if (!this._nodes[key]) continue;
@@ -460,10 +473,11 @@ export class CopcDataSource {
     // ── 중심 우선 정렬 ──
     // sphereMap에서 O(1)로 꺼내므로 sort 중 proj4 재실행 없음.
     // B-3: 두 개의 별도 scratch 사용 (a·b 계산 중 덮어쓰기 방지)
-    const camPos    = camera.position;
-    const camDir    = camera.direction;
-    const scratchA  = new Cesium.Cartesian3();
-    const scratchB  = new Cesium.Cartesian3();
+    // PERF: scratch는 클래스 필드(_scratchA/B) 재사용 — 매 호출 할당 방지
+    const camPos   = camera.position;
+    const camDir   = camera.direction;
+    const scratchA = this._scratchA;
+    const scratchB = this._scratchB;
 
     visibleKeys.sort((a, b) => {
       Cesium.Cartesian3.subtract(getSphere(a).center, camPos, scratchA);
@@ -522,27 +536,15 @@ export class CopcDataSource {
         }
       }
 
-      // 3. 화면 중앙에 가까운 노드부터 로드 (시점 중심 우선)
-      // sphereMap 재사용으로 추가 proj4 호출 없음
-      const camPos = camera.position;
-      const camDir = camera.direction;
-      const sv     = new Cesium.Cartesian3();
-      toLoad.sort((a, b) => {
-        Cesium.Cartesian3.subtract(getSphere(a).center, camPos, sv);
-        Cesium.Cartesian3.normalize(sv, sv);
-        const dotA = Cesium.Cartesian3.dot(sv, camDir);
-        Cesium.Cartesian3.subtract(getSphere(b).center, camPos, sv);
-        Cesium.Cartesian3.normalize(sv, sv);
-        const dotB = Cesium.Cartesian3.dot(sv, camDir);
-        return dotB - dotA;
-      });
+      // 3. toLoad는 visibleKeys(이미 카메라 방향 기준 정렬)에서 캐시 미스만 걸러낸 것이므로
+      //    순서가 그대로 유지됨 — 추가 정렬 불필요.
 
       this._emit({ depth: maxDepth, visible: visibleKeys.length, culled,
         loading: toLoad.length, cached: this._cache.size, height });
 
       // 4. 캐시 미스 → 노드 로드
       let loadedCount = 0;
-      await this._runConcurrent(toLoad.map(key => async () => {
+      const makeLoadTask = (key) => async () => {
         // 로드 시작 전 세대 확인: 카메라가 이미 움직였으면 이 노드는 건너뜀
         if (gen !== this._loadGen) return;
 
@@ -573,7 +575,22 @@ export class CopcDataSource {
         loadedCount++;
         this._emit({ depth: maxDepth, visible: visibleKeys.length, culled,
           loading: toLoad.length - loadedCount, cached: this._cache.size, height });
-      }));
+      };
+
+      // 화면 중앙 노드 선점 — await 없이 먼저 킥오프해 워커 슬롯 1개를 선점.
+      // toLoad는 이미 카메라 방향 기준 정렬되어 있으므로 [0]이 가장 중앙에 해당.
+      // 나머지 노드와 동시에 진행되므로 전체 씬 채우는 속도는 기존과 동일.
+      const priorityPromise = toLoad.length > 0
+        ? makeLoadTask(toLoad.shift())().catch(err =>
+            console.warn('[CopcDataSource] 중앙 노드 로드 실패:', err)
+          )
+        : null;
+
+      // 나머지 노드 병렬 로드
+      await this._runConcurrent(toLoad.map(makeLoadTask));
+
+      // 중앙 노드 완료 대기 (나머지와 거의 동시에 끝나지만 명시적으로 보장)
+      if (priorityPromise) await priorityPromise;
 
       // 5‒7. gen 불일치(로드 중 카메라 이동) 시 씬 정리를 건너뜀.
       //       새 노드가 씬에 추가되지 않은 상태에서 기존 노드를 제거하면
