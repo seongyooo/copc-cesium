@@ -268,7 +268,7 @@ export async function loadNode(url, copc, nodeInfo, pool, srcProj, projDef, geoi
 
   // ── 2. Worker: proj4 변환 + WGS84 Cartesian3 계산 ────────
   const { positions, colors, pointCount } = await pool.run(
-    { xs, ys, zs, rs, gs, bs, pointCount: n, srcProj, projDef, geoidOffset, zFactor },
+    { xs, ys, zs, rs, gs, bs, pointCount: n, srcProj, projDef, geoidOffset, zFactor, hasRGB },
     [xs.buffer, ys.buffer, zs.buffer, rs.buffer, gs.buffer, bs.buffer],
   );
 

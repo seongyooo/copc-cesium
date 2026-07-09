@@ -34,7 +34,7 @@ function lonLatAltToCartesian(lonDeg, latDeg, altM) {
 const _registeredProjs = new Set();
 
 self.onmessage = ({ data }) => {
-  const { id, xs, ys, zs, rs, gs, bs, pointCount, srcProj, projDef, geoidOffset, zFactor = 0.3048 } = data;
+  const { id, xs, ys, zs, rs, gs, bs, pointCount, srcProj, projDef, geoidOffset, zFactor = 0.3048, hasRGB = true } = data;
 
   try {
     if (!Number.isInteger(pointCount) || pointCount < 0 || pointCount > 10_000_000) {
@@ -62,16 +62,18 @@ self.onmessage = ({ data }) => {
       }
     }
 
-    // ── A-7: RGB 비트 심도 자동 판별 ────────────────────────
-    // COPC 포맷은 R/G/B를 uint16(0-65535) 또는 uint8(0-255)로 저장할 수 있다.
-    // 최댓값을 샘플링하여 255 초과 시 16-bit, 이하이면 8-bit로 판정.
+    // ── A-7: 색상 스케일 결정 ────────────────────────────────
+    // RGB: uint16(0-65535) or uint8(0-255) → 최댓값으로 판별
+    // Intensity(grayscale): 실제 max로 정규화하여 전체 밝기 범위 활용
     let maxColor = 0;
     for (let i = 0; i < pointCount; i++) {
       if (rs[i] > maxColor) maxColor = rs[i];
       if (gs[i] > maxColor) maxColor = gs[i];
       if (bs[i] > maxColor) maxColor = bs[i];
     }
-    const colorScale = maxColor > 255 ? 65535 : 255;
+    const colorScale = hasRGB
+      ? (maxColor > 255 ? 65535 : 255)
+      : (maxColor || 1);
 
     // ── 출력 버퍼 ────────────────────────────────────────────
     const positions = new Float64Array(pointCount * 3);
