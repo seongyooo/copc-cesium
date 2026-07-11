@@ -101,6 +101,13 @@ self.onmessage = ({ data }: MessageEvent<WorkerMessage>) => {
       let lat: number;
       if (needsProj && converter) {
         [lon, lat] = converter.forward([xs[i], ys[i]]);
+        // A5: 첫 포인트뿐만 아니라 모든 포인트에서 NaN 감지
+        if (!isFinite(lon) || !isFinite(lat)) {
+          throw new Error(
+            `proj4 변환 실패 (index ${i}, NaN): x=${xs[i]}, y=${ys[i]}. ` +
+            `projDef가 올바른지 확인하세요.`
+          );
+        }
       } else {
         lon = xs[i];
         lat = ys[i];

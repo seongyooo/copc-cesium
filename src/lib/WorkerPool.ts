@@ -46,7 +46,8 @@ export class WorkerPool {
     this._idle    = [];
     this._queue   = [];
 
-    const createWorker = (): Worker => {
+    // B2: 재귀 재시도에 한도를 두어 Worker 오류 시 무한 루프 방지
+    const createWorker = (retries = 3): Worker => {
       const w = new Worker(workerUrl, { type: 'module' });
       w.onmessage = ({ data }) => this._onResult(data, w);
       w.onerror = (e) => {
@@ -58,11 +59,16 @@ export class WorkerPool {
             p.reject(new Error(`Worker crashed: ${e.message}`));
           }
         }
-        // idle 목록에서 제거 후 교체 Worker 생성
+        // idle 목록에서 제거
         const idx = this._idle.indexOf(w);
         if (idx !== -1) this._idle.splice(idx, 1);
-        this._idle.push(createWorker());
-        this._flush();
+        // 재시도 한도 내에서만 교체 Worker 생성
+        if (retries > 0) {
+          this._idle.push(createWorker(retries - 1));
+          this._flush();
+        } else {
+          console.error('[WorkerPool] Worker 복구 실패 — 재시도 한도 초과');
+        }
       };
       return w;
     };

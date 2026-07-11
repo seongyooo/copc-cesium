@@ -4,7 +4,17 @@ import type { Hierarchy } from 'copc';
 import type { Ref, NodeCacheEntry, Renderable } from '../types.js';
 import { WorkerPool } from './WorkerPool.js';
 
-const CesiumAny = Cesium as any;
+// C1: Cesium 내부 API는 공개 타입이 없으므로 사용하는 API만 최소 선언
+interface CesiumInternal {
+  Buffer: { createVertexBuffer(opts: { context: unknown; typedArray: ArrayBufferView; usage: unknown }): unknown };
+  BufferUsage: { STATIC_DRAW: unknown };
+  VertexArray: new (opts: { context: unknown; attributes: unknown[] }) => { destroy(): void };
+  ShaderProgram: { fromCache(opts: { context: unknown; vertexShaderSource: string; fragmentShaderSource: string; attributeLocations: Record<string, number> }): { destroy(): void } };
+  DrawCommand: new (opts: Record<string, unknown>) => unknown;
+  RenderState: { fromCache(opts: Record<string, unknown>): unknown };
+  Pass: { OPAQUE: unknown };
+}
+const CesiumAny = Cesium as unknown as CesiumInternal;
 
 // ── PointCloudPrimitive ──────────────────────────────────────
 //
@@ -72,7 +82,7 @@ class PointCloudPrimitive implements Renderable {
     frameState.commandList.push(this._cmd);
   }
 
-  private _initGpu(context: any): void {
+  private _initGpu(context: unknown): void {
     // ── 버텍스 버퍼 생성 ─────────────────────────────────────
     const mkVBuf = (arr: ArrayBufferView) => CesiumAny.Buffer.createVertexBuffer({
       context,
@@ -80,53 +90,57 @@ class PointCloudPrimitive implements Renderable {
       usage: CesiumAny.BufferUsage.STATIC_DRAW,
     });
 
-    // ── 버텍스 배열 (VAO) ────────────────────────────────────
-    //   location 0 → position3DHigh (Float32 ×3)
-    //   location 1 → position3DLow  (Float32 ×3)
-    //   location 2 → color          (Uint8   ×4, normalized)
-    //   location 3 → classification (Uint8   ×1, 정수값)
-    const va = new CesiumAny.VertexArray({
-      context,
-      attributes: [
-        {
-          index:                 0,
-          vertexBuffer:          mkVBuf(this._posHigh!),
-          componentsPerAttribute: 3,
-          componentDatatype:     Cesium.ComponentDatatype.FLOAT,
-          offsetInBytes:         0,
-          strideInBytes:         12,
-        },
-        {
-          index:                 1,
-          vertexBuffer:          mkVBuf(this._posLow!),
-          componentsPerAttribute: 3,
-          componentDatatype:     Cesium.ComponentDatatype.FLOAT,
-          offsetInBytes:         0,
-          strideInBytes:         12,
-        },
-        {
-          index:                 2,
-          vertexBuffer:          mkVBuf(this._colU8!),
-          componentsPerAttribute: 4,
-          componentDatatype:     Cesium.ComponentDatatype.UNSIGNED_BYTE,
-          normalize:             true,
-          offsetInBytes:         0,
-          strideInBytes:         4,
-        },
-        {
-          index:                 3,
-          vertexBuffer:          mkVBuf(this._cls!),
-          componentsPerAttribute: 1,
-          componentDatatype:     Cesium.ComponentDatatype.UNSIGNED_BYTE,
-          normalize:             false,
-          offsetInBytes:         0,
-          strideInBytes:         1,
-        },
-      ],
-    });
+    // B3: GPU 자원을 단계적으로 생성하고 중간 실패 시 즉시 정리
+    let va: ReturnType<CesiumInternal['VertexArray']['prototype']['constructor']> | null = null;
+    let sp: ReturnType<typeof CesiumAny.ShaderProgram.fromCache> | null = null;
+    try {
+      // ── 버텍스 배열 (VAO) ──────────────────────────────────
+      //   location 0 → position3DHigh (Float32 ×3)
+      //   location 1 → position3DLow  (Float32 ×3)
+      //   location 2 → color          (Uint8   ×4, normalized)
+      //   location 3 → classification (Uint8   ×1, 정수값)
+      va = new CesiumAny.VertexArray({
+        context,
+        attributes: [
+          {
+            index:                 0,
+            vertexBuffer:          mkVBuf(this._posHigh!),
+            componentsPerAttribute: 3,
+            componentDatatype:     Cesium.ComponentDatatype.FLOAT,
+            offsetInBytes:         0,
+            strideInBytes:         12,
+          },
+          {
+            index:                 1,
+            vertexBuffer:          mkVBuf(this._posLow!),
+            componentsPerAttribute: 3,
+            componentDatatype:     Cesium.ComponentDatatype.FLOAT,
+            offsetInBytes:         0,
+            strideInBytes:         12,
+          },
+          {
+            index:                 2,
+            vertexBuffer:          mkVBuf(this._colU8!),
+            componentsPerAttribute: 4,
+            componentDatatype:     Cesium.ComponentDatatype.UNSIGNED_BYTE,
+            normalize:             true,
+            offsetInBytes:         0,
+            strideInBytes:         4,
+          },
+          {
+            index:                 3,
+            vertexBuffer:          mkVBuf(this._cls!),
+            componentsPerAttribute: 1,
+            componentDatatype:     Cesium.ComponentDatatype.UNSIGNED_BYTE,
+            normalize:             false,
+            offsetInBytes:         0,
+            strideInBytes:         1,
+          },
+        ],
+      });
 
-    // ── 셰이더 ───────────────────────────────────────────────
-    const vs = `
+      // ── 셰이더 ─────────────────────────────────────────────
+      const vs = `
 in vec3 position3DHigh;
 in vec3 position3DLow;
 in vec4 color;
@@ -145,7 +159,7 @@ void main() {
   gl_Position = czm_modelViewProjectionRelativeToEye * p;
 }`;
 
-    const fs = `
+      const fs = `
 in vec4 v_color;
 flat in float v_cls;
 uniform int u_classMask;
@@ -156,46 +170,53 @@ void main() {
   fragColor = v_color;
 }`;
 
-    // uniformMap 클로저: ref 객체를 캡처하여 매 프레임 최신값 반환
-    const pixelSizeRef    = this._pixelSizeRef;
-    const classMaskRef    = this._classMaskRef;
-    const upVecRef        = this._upVecRef;
-    const heightOffsetRef = this._heightOffsetRef;
+      // uniformMap 클로저: ref 객체를 캡처하여 매 프레임 최신값 반환
+      const pixelSizeRef    = this._pixelSizeRef;
+      const classMaskRef    = this._classMaskRef;
+      const upVecRef        = this._upVecRef;
+      const heightOffsetRef = this._heightOffsetRef;
 
-    const sp = CesiumAny.ShaderProgram.fromCache({
-      context,
-      vertexShaderSource:   vs,
-      fragmentShaderSource: fs,
-      attributeLocations: {
-        position3DHigh: 0,
-        position3DLow:  1,
-        color:          2,
-        classification: 3,
-      },
-    });
+      sp = CesiumAny.ShaderProgram.fromCache({
+        context,
+        vertexShaderSource:   vs,
+        fragmentShaderSource: fs,
+        attributeLocations: {
+          position3DHigh: 0,
+          position3DLow:  1,
+          color:          2,
+          classification: 3,
+        },
+      });
 
-    // ── DrawCommand ──────────────────────────────────────────
-    this._va  = va;
-    this._sp  = sp;
-    this._cmd = new CesiumAny.DrawCommand({
-      vertexArray:    va,
-      primitiveType:  Cesium.PrimitiveType.POINTS,
-      shaderProgram:  sp,
-      renderState:    CesiumAny.RenderState.fromCache({
-        depthTest: { enabled: true },
-        depthMask: true,
-      }),
-      boundingVolume: this._boundingSphere,
-      count:          this._pointCount,
-      pass:           CesiumAny.Pass.OPAQUE,
-      modelMatrix:    Cesium.Matrix4.IDENTITY,
-      uniformMap: {
-        u_pixelSize:    () => pixelSizeRef.value,
-        u_classMask:    () => classMaskRef.value,
-        u_upVec:        () => upVecRef ? upVecRef.value : new Cesium.Cartesian3(0, 0, 1),
-        u_heightOffset: () => heightOffsetRef ? heightOffsetRef.value : 0,
-      },
-    });
+      // ── DrawCommand ────────────────────────────────────────
+      this._va  = va;
+      this._sp  = sp;
+      this._cmd = new CesiumAny.DrawCommand({
+        vertexArray:    va,
+        primitiveType:  Cesium.PrimitiveType.POINTS,
+        shaderProgram:  sp,
+        renderState:    CesiumAny.RenderState.fromCache({
+          depthTest: { enabled: true },
+          depthMask: true,
+        }),
+        boundingVolume: this._boundingSphere,
+        count:          this._pointCount,
+        pass:           CesiumAny.Pass.OPAQUE,
+        modelMatrix:    Cesium.Matrix4.IDENTITY,
+        uniformMap: {
+          u_pixelSize:    () => pixelSizeRef.value,
+          u_classMask:    () => classMaskRef.value,
+          u_upVec:        () => upVecRef ? upVecRef.value : new Cesium.Cartesian3(0, 0, 1),
+          u_heightOffset: () => heightOffsetRef ? heightOffsetRef.value : 0,
+        },
+      });
+    } catch (err) {
+      // B3: 부분 생성된 GPU 자원 즉시 해제 후 상위로 전파
+      try { if (va) va.destroy(); }  catch { /* ignore */ }
+      try { if (sp) sp.destroy(); }  catch { /* ignore */ }
+      this._destroyed = true;
+      throw err;
+    }
 
     // CPU 사이드 배열 해제 (GPU 업로드 완료)
     this._posHigh = null;

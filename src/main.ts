@@ -184,23 +184,35 @@ zoomOutBtn.addEventListener('click', () => {
 
 // ── 지형/이미지 ────────────────────────────────────────────
 terrainSelect.addEventListener('change', async () => {
-  if (terrainSelect.value === 'world') {
-    viewer.terrainProvider = await Cesium.createWorldTerrainAsync();
-  } else {
-    viewer.terrainProvider = new Cesium.EllipsoidTerrainProvider();
+  // G1: Ion 토큰 만료나 네트워크 오류 시 unhandled rejection 방지
+  try {
+    if (terrainSelect.value === 'world') {
+      viewer.terrainProvider = await Cesium.createWorldTerrainAsync();
+    } else {
+      viewer.terrainProvider = new Cesium.EllipsoidTerrainProvider();
+    }
+  } catch (err) {
+    console.error('[main] 지형 로드 실패:', err);
+    infoStatus.textContent = `❌ 지형 로드 실패: ${(err as Error).message}`;
   }
 });
 
 imagerySelect.addEventListener('change', async () => {
-  const v = imagerySelect.value;
-  viewer.imageryLayers.removeAll();
-  if (v === 'satellite') {
-    const p = await Cesium.IonImageryProvider.fromAssetId(2);
-    viewer.imageryLayers.addImageryProvider(p);
-  } else if (v === 'osm') {
-    viewer.imageryLayers.addImageryProvider(
-      new Cesium.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' }),
-    );
+  // G1: Ion 토큰 만료나 네트워크 오류 시 unhandled rejection 방지
+  try {
+    const v = imagerySelect.value;
+    viewer.imageryLayers.removeAll();
+    if (v === 'satellite') {
+      const p = await Cesium.IonImageryProvider.fromAssetId(2);
+      viewer.imageryLayers.addImageryProvider(p);
+    } else if (v === 'osm') {
+      viewer.imageryLayers.addImageryProvider(
+        new Cesium.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' }),
+      );
+    }
+  } catch (err) {
+    console.error('[main] 이미지리 로드 실패:', err);
+    infoStatus.textContent = `❌ 이미지리 로드 실패: ${(err as Error).message}`;
   }
 });
 

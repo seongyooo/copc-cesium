@@ -376,15 +376,14 @@ export class CopcDataSource {
     const scratchA = this._scratchA;
     const scratchB = this._scratchB;
 
-    visibleKeys.sort((a, b) => {
-      Cesium.Cartesian3.subtract(getSphere(a).center, camPos, scratchA);
+    // D1: 정렬 비교 시마다 벡터 연산을 반복하지 않도록 dot product를 미리 계산
+    const dotCache = new Map<string, number>();
+    for (const key of visibleKeys) {
+      Cesium.Cartesian3.subtract(getSphere(key).center, camPos, scratchA);
       Cesium.Cartesian3.normalize(scratchA, scratchA);
-      const dotA = Cesium.Cartesian3.dot(scratchA, camDir);
-      Cesium.Cartesian3.subtract(getSphere(b).center, camPos, scratchB);
-      Cesium.Cartesian3.normalize(scratchB, scratchB);
-      const dotB = Cesium.Cartesian3.dot(scratchB, camDir);
-      return dotB - dotA;
-    });
+      dotCache.set(key, Cesium.Cartesian3.dot(scratchA, camDir));
+    }
+    visibleKeys.sort((a, b) => (dotCache.get(b) ?? 0) - (dotCache.get(a) ?? 0));
 
     return { visibleKeys, sphereMap, culled, maxDepth };
   }
@@ -399,7 +398,7 @@ export class CopcDataSource {
 
     try {
       const camera = this._viewer.camera;
-      const height = camera.positionCartographic.height;
+      const height = camera.positionCartographic?.height ?? 0;
 
       const { visibleKeys, sphereMap, culled, maxDepth } = this._selectNodesBFS();
       const targetSet = new Set(visibleKeys);
@@ -526,7 +525,8 @@ export class CopcDataSource {
           this._container.remove(d.collection);
           this._inScene.delete(k);
         }
-        d.collection.destroy();
+        // E2: 이미 destroy된 객체에 재호출 방지
+        if (!d.collection.isDestroyed()) d.collection.destroy();
         this._cache.delete(k);
       });
   }
@@ -545,13 +545,13 @@ export class CopcDataSource {
   }
 
   private _startListening(): void {
-    let prevHeight = this._viewer.camera.positionCartographic.height;
+    let prevHeight = this._viewer.camera.positionCartographic?.height ?? 0;
     let lastLodMs  = 0;
 
     this._removePostUpdateListener = this._viewer.scene.postUpdate.addEventListener(() => {
       if (this._destroyed) return;
 
-      const h = this._viewer.camera.positionCartographic.height;
+      const h = this._viewer.camera.positionCartographic?.height ?? 0;
       if (h > prevHeight) this._loadGen++;
       prevHeight = h;
 
@@ -560,14 +560,19 @@ export class CopcDataSource {
       const now = Date.now();
       if (now - lastLodMs >= 200) {
         lastLodMs = now;
-        void this._updateLoD();
+        // G2: void로 버리지 않고 오류를 콘솔에 기록
+        void this._updateLoD().catch(err =>
+          console.error('[CopcDataSource] LoD 업데이트 실패:', err)
+        );
       }
     });
 
     this._removeMoveEndListener = this._viewer.camera.moveEnd.addEventListener(() => {
       if (this._destroyed) return;
       lastLodMs = Date.now();
-      void this._updateLoD();
+      void this._updateLoD().catch(err =>
+        console.error('[CopcDataSource] LoD 업데이트 실패:', err)
+      );
     });
   }
 
