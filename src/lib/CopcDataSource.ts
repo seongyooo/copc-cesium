@@ -330,11 +330,15 @@ export class CopcDataSource {
     const visibleKeys: string[] = [];
     let   culled      = 0;
     let   maxDepth    = 0;
-    const queue: string[] = ['0-0-0-0'];
-    let   qHead       = 0;
 
-    while (qHead < queue.length) {
-      const key = queue[qHead++];
+    // SSE 내림차순 우선순위 큐: 카메라 기준 가장 중요한 노드부터 확장
+    // FIFO 큐와 달리 멀리 있는 노드보다 가까운 고-SSE 노드를 우선 처리
+    const rootSphere = getSphere('0-0-0-0');
+    const rootSse    = screenSpaceError(rootSphere, camera, scene);
+    const pq: Array<{ key: string; sse: number }> = [{ key: '0-0-0-0', sse: rootSse }];
+
+    while (pq.length > 0) {
+      const { key } = pq.shift()!;
 
       const nodeInfo = this._nodes[key];
       if (!nodeInfo) continue;
@@ -344,9 +348,11 @@ export class CopcDataSource {
       if (!isInFrustum(sphere, cv)) { culled++; continue; }
 
       if (nodeInfo.pointCount === 0) {
-        getChildKeys(key)
-          .filter(k => this._nodes[k])
-          .forEach(k => queue.push(k));
+        const children = getChildKeys(key).filter(k => this._nodes[k]);
+        for (const k of children) {
+          pq.push({ key: k, sse: screenSpaceError(getSphere(k), camera, scene) });
+        }
+        pq.sort((a, b) => b.sse - a.sse);
         continue;
       }
 
@@ -354,7 +360,10 @@ export class CopcDataSource {
       const children = getChildKeys(key).filter(k => this._nodes[k]);
 
       if (visibleKeys.length < maxNodes && sse > threshold && children.length > 0) {
-        children.forEach(k => queue.push(k));
+        for (const k of children) {
+          pq.push({ key: k, sse: screenSpaceError(getSphere(k), camera, scene) });
+        }
+        pq.sort((a, b) => b.sse - a.sse);
       } else {
         visibleKeys.push(key);
         const d = getDepth(key);
@@ -423,7 +432,7 @@ export class CopcDataSource {
 
       let loadedCount = 0;
       const makeLoadTask = (key: string) => async (): Promise<void> => {
-        if (gen !== this._loadGen) return;
+        if (gen !== this._loadGen || this._destroyed) return;
 
         const nodeInfo = this._nodes[key];
         if (!nodeInfo) return;
@@ -435,6 +444,12 @@ export class CopcDataSource {
           this._opts.zFactor ?? 0.3048,
           this._upVecRef, this._heightOffsetRef,
         );
+
+        // await 이후: destroy() 호출 여부를 반드시 먼저 확인
+        if (this._destroyed) {
+          data.collection.destroy();
+          return;
+        }
 
         if (gen !== this._loadGen) {
           if (!this._cache.has(key)) {
@@ -465,7 +480,7 @@ export class CopcDataSource {
 
       if (priorityPromise) await priorityPromise;
 
-      if (gen === this._loadGen) {
+      if (gen === this._loadGen && !this._destroyed) {
         for (const [key, data] of this._cache) {
           if (!targetSet.has(key) && this._inScene.has(key)) {
             this._container.remove(data.collection);
