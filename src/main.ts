@@ -1,10 +1,17 @@
 import * as Cesium from 'cesium';
 import 'cesium/Build/Cesium/Widgets/widgets.css';
 import { CopcDataSource } from './lib/CopcDataSource.js';
+import { WorkerPool } from './lib/WorkerPool.js';
+import CopcWorker from './lib/worker.ts?worker';
 import type { ProgressInfo, PresetConfig } from './types.js';
 
 // ── CesiumJS 초기화 ────────────────────────────────────────
 Cesium.Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_TOKEN;
+
+// 앱 생명주기 동안 유지되는 공유 워커 풀. CopcDataSource가 매번 자체
+// 워커 풀을 새로 만들면 데이터셋을 전환할 때마다 워커가 재생성되고,
+// laz-perf(wasm) 컴파일도 워커마다 다시 일어나 눈에 띄게 느려진다.
+const sharedWorkerPool = new WorkerPool(CopcWorker, 5);
 
 const viewer = new Cesium.Viewer('cesiumContainer', {
   baseLayerPicker:      false,
@@ -482,7 +489,7 @@ async function loadCopc(url: string, opts: Partial<PresetConfig> = {}): Promise<
       concurrency:   5,
       maxCacheNodes: 150,
       pixelSize:     parseFloat(pixelSizeSlider.value),
-    });
+    }, sharedWorkerPool);
 
     if (ctrl.abort) { ds.destroy(); return; }
     currentDs = ds;

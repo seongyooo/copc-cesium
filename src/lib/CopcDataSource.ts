@@ -168,6 +168,7 @@ export class CopcDataSource {
   private _viewer:   Cesium.Viewer;
   private _opts:     InternalCopcOptions;
   private _pool:     WorkerPool;
+  private _ownsPool: boolean;
   private _container: Cesium.PrimitiveCollection;
   private _sphereCache: Map<string, Cesium.BoundingSphere>;
   private _shiftedSphereCache: Map<string, Cesium.BoundingSphere>;
@@ -202,7 +203,7 @@ export class CopcDataSource {
   private _nodes!: Hierarchy.Node.Map;
   private _maxDepth!: number;
 
-  constructor(viewer: Cesium.Viewer, options: Partial<CopcOptions> = {}) {
+  constructor(viewer: Cesium.Viewer, options: Partial<CopcOptions> = {}, pool?: WorkerPool) {
     this._viewer = viewer;
     this._opts   = {
       proj:            'EPSG:4326',
@@ -223,8 +224,11 @@ export class CopcDataSource {
       proj4.defs(this._opts.proj, this._opts.projDef);
     }
 
-    // Worker 풀 (Blob URL 인라인 워커 — 정적 파일 MIME 타입 이슈 회피)
-    this._pool = new WorkerPool(CopcWorker, this._opts.concurrency);
+    // Worker 풀: 외부에서 공유 풀이 전달되면 재사용(데이터셋 전환마다 워커를
+    // 재생성하면 laz-perf wasm을 워커마다 다시 컴파일해야 해서 느려짐 —
+    // main.ts가 앱 생명주기 동안 유지되는 풀을 넘겨준다). 없으면 자체 생성.
+    this._pool     = pool ?? new WorkerPool(CopcWorker, this._opts.concurrency);
+    this._ownsPool = !pool;
 
     this._container = new Cesium.PrimitiveCollection({ destroyPrimitives: false });
     viewer.scene.primitives.add(this._container);
@@ -259,8 +263,13 @@ export class CopcDataSource {
 
   // ── 정적 팩토리 ─────────────────────────────────────────────
 
-  static async load(url: string, viewer: Cesium.Viewer, options: Partial<CopcOptions> = {}): Promise<CopcDataSource> {
-    const ds = new CopcDataSource(viewer, options);
+  static async load(
+    url: string,
+    viewer: Cesium.Viewer,
+    options: Partial<CopcOptions> = {},
+    pool?: WorkerPool,
+  ): Promise<CopcDataSource> {
+    const ds = new CopcDataSource(viewer, options, pool);
     await ds._init(url);
     return ds;
   }
@@ -333,7 +342,7 @@ export class CopcDataSource {
       await this._updateLoD();
       this._startListening();
     } catch (err) {
-      this._pool.destroy();
+      if (this._ownsPool) this._pool.destroy();
       this._viewer.scene.primitives.remove(this._container);
       throw err;
     }
@@ -445,13 +454,21 @@ export class CopcDataSource {
       }
 
       const sse = screenSpaceError(sphere, camera, scene);
-      const children = getChildKeys(key).filter(k => this._nodes[k]);
 
-      if (visibleKeys.length < maxNodes && sse > threshold && children.length > 0) {
-        for (const k of children) {
-          heap.push({ key: k, sse: screenSpaceError(getSphere(k), camera, scene) });
+      // 성능: 리프로 판정될 노드(SSE가 이미 threshold 이하)에서는 자식 키를
+      // 계산할 필요가 없다 — BFS 결과 대다수가 리프이므로, 조건을 먼저 걸러
+      // sse > threshold일 때만 getChildKeys(문자열 8개 생성 + 해시맵 조회)를 수행한다.
+      let subdivided = false;
+      if (visibleKeys.length < maxNodes && sse > threshold) {
+        const children = getChildKeys(key).filter(k => this._nodes[k]);
+        if (children.length > 0) {
+          for (const k of children) {
+            heap.push({ key: k, sse: screenSpaceError(getSphere(k), camera, scene) });
+          }
+          subdivided = true;
         }
-      } else {
+      }
+      if (!subdivided) {
         visibleKeys.push(key);
         const d = getDepth(key);
         if (d > maxDepth) maxDepth = d;
@@ -759,7 +776,10 @@ export class CopcDataSource {
     if (this._removeMoveEndListener)    this._removeMoveEndListener();
     if (this._emitTimer) { clearTimeout(this._emitTimer); this._emitTimer = null; }
     this._pendingEmit = null;
-    this._pool.destroy();
+    // 공유 풀(main.ts가 데이터셋 전환 간 재사용)은 이 인스턴스가 destroy될 때
+    // 함께 종료하면 안 된다 — 자체 생성한 풀일 때만 정리한다. 아직 진행 중인
+    // pool.run() 요청은 _destroyed/_loadGen 체크로 결과가 그냥 버려진다.
+    if (this._ownsPool) this._pool.destroy();
     for (const data of this._cache.values()) {
       data.collection.destroy();
     }

@@ -92,26 +92,26 @@ self.onmessage = async ({ data }: MessageEvent<WorkerMessage>) => {
     const cls = new Uint8Array(n);
     const seenClasses = new Set<number>();
 
+    // 성능: RGB/Intensity 색상 스케일(maxColor) 판별(A-7)을 별도 패스로
+    // 다시 훑지 않고, 속성 추출 루프 안에서 같이 추적한다.
+    let maxColor = 0;
     for (let i = 0; i < n; i++) {
       xs[i] = getX(i); ys[i] = getY(i); zs[i] = getZ(i);
+      let r: number, g: number, b: number;
       if (hasRGB && getR && getG && getB) {
-        rs[i] = getR(i); gs[i] = getG(i); bs[i] = getB(i);
+        r = getR(i); g = getG(i); b = getB(i);
       } else if (getI) {
-        rs[i] = gs[i] = bs[i] = getI(i);
+        r = g = b = getI(i);
       } else {
-        rs[i] = gs[i] = bs[i] = 65535;
+        r = g = b = 65535;
       }
+      rs[i] = r; gs[i] = g; bs[i] = b;
+      if (r > maxColor) maxColor = r;
+      if (g > maxColor) maxColor = g;
+      if (b > maxColor) maxColor = b;
       const c = getCls ? (getCls(i) & 0xFF) : 0;
       cls[i] = c;
       seenClasses.add(c);
-    }
-
-    // ── 2. RGB/Intensity 색상 스케일 판별 (A-7) ──────────────
-    let maxColor = 0;
-    for (let i = 0; i < n; i++) {
-      if (rs[i] > maxColor) maxColor = rs[i];
-      if (gs[i] > maxColor) maxColor = gs[i];
-      if (bs[i] > maxColor) maxColor = bs[i];
     }
     const colorScale = hasRGB
       ? (maxColor > 255 ? 65535 : 255)
@@ -135,8 +135,13 @@ self.onmessage = async ({ data }: MessageEvent<WorkerMessage>) => {
     }
 
     // ── 4. 좌표 변환 (proj4 → lon/lat) + ECEF Cartesian3 계산 ─
+    //    + Float32 high/low(RTE) 분리를 같은 루프에서 수행 (성능: 별도
+    //    패스로 positions를 다시 훑지 않음). BoundingSphere는 전체 평균이
+    //    필요해 positions(Float64) 자체는 계속 채워둔다.
     const positions = new Float64Array(n * 3);
     const colors    = new Uint8Array(n * 4); // C-4: Uint8Array로 직접 생성
+    const posHigh   = new Float32Array(n * 3);
+    const posLow    = new Float32Array(n * 3);
 
     for (let i = 0; i < n; i++) {
       let lon: number;
@@ -157,9 +162,14 @@ self.onmessage = async ({ data }: MessageEvent<WorkerMessage>) => {
       const alt          = zs[i] * zFactor + geoidOffset;
       const [cx, cy, cz] = lonLatAltToCartesian(lon, lat, alt);
 
-      positions[i * 3]     = cx;
-      positions[i * 3 + 1] = cy;
-      positions[i * 3 + 2] = cz;
+      const i3 = i * 3;
+      positions[i3]     = cx;
+      positions[i3 + 1] = cy;
+      positions[i3 + 2] = cz;
+
+      let hi = Math.fround(cx); posHigh[i3]     = hi; posLow[i3]     = cx - hi;
+      hi     = Math.fround(cy); posHigh[i3 + 1] = hi; posLow[i3 + 1] = cy - hi;
+      hi     = Math.fround(cz); posHigh[i3 + 2] = hi; posLow[i3 + 2] = cz - hi;
 
       colors[i * 4]     = (rs[i] / colorScale * 255 + 0.5) | 0;
       colors[i * 4 + 1] = (gs[i] / colorScale * 255 + 0.5) | 0;
@@ -167,17 +177,7 @@ self.onmessage = async ({ data }: MessageEvent<WorkerMessage>) => {
       colors[i * 4 + 3] = 255;
     }
 
-    // ── 5. ECEF Float64 → Float32 high/low 분리 (RTE) ────────
-    const posHigh = new Float32Array(n * 3);
-    const posLow  = new Float32Array(n * 3);
-    for (let i = 0; i < n * 3; i++) {
-      const v    = positions[i];
-      const hi   = Math.fround(v);
-      posHigh[i] = hi;
-      posLow[i]  = v - hi;
-    }
-
-    // ── 6. BoundingSphere (ECEF, Float64 평균/최대거리) ──────
+    // ── 5. BoundingSphere (ECEF, Float64 평균/최대거리) ──────
     let sumX = 0, sumY = 0, sumZ = 0;
     for (let i = 0; i < n; i++) {
       sumX += positions[i * 3];
