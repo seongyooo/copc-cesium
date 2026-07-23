@@ -77,7 +77,16 @@ class PointCloudPrimitive implements Renderable {
   update(frameState: any): void {
     if (!this.show || this._destroyed) return;
     if (!this._cmd) {
-      this._initGpu(frameState.context);
+      // GPU 자원 생성 실패(컨텍스트 손실, VRAM 부족 등)가 여기서 그대로
+      // throw되면 Cesium의 프레임 루프(Scene.render → PrimitiveCollection.update)
+      // 전체를 중단시킬 수 있으므로, 이 노드 하나만 렌더링 스킵 처리하고 격리한다.
+      try {
+        this._initGpu(frameState.context);
+      } catch (err) {
+        console.error('[PointCloudPrimitive] GPU 초기화 실패, 이 노드는 렌더링에서 제외됩니다:', err);
+        this._destroyed = true;
+        return;
+      }
     }
     frameState.commandList.push(this._cmd);
   }

@@ -41,4 +41,10 @@ const lazPerfWasmPlugin = {
 
 export default defineConfig({
   plugins: [cesium(), lazPerfWasmPlugin],
+  // worker.ts는 ?worker&inline으로 임포트되어 Blob URL로 인라인되므로
+  // 별도 정적 파일로 서빙되지 않음 (MIME 타입 문제 회피). ES 포맷으로
+  // 번들해야 worker.ts 내부의 `import proj4 from 'proj4'`가 처리된다.
+  worker: {
+    format: 'es',
+  },
 });

@@ -30,6 +30,8 @@ interface QueueEntry {
   reject: (err: Error) => void;
 }
 
+export type WorkerCtor = new () => Worker;
+
 export class WorkerPool {
   private _pending: Map<string, PendingEntry>;
   private _counter: number;
@@ -37,10 +39,11 @@ export class WorkerPool {
   private _queue: QueueEntry[];
 
   /**
-   * @param workerUrl  Worker 스크립트 URL
+   * @param WorkerCtor Vite `?worker&inline` 생성자 (Blob URL 기반이므로
+   *                   정적 파일로 서빙되지 않아 MIME 타입 문제가 없음)
    * @param size       풀 크기 (동시 실행 Worker 수)
    */
-  constructor(workerUrl: string | URL, size: number) {
+  constructor(WorkerCtor: WorkerCtor, size: number) {
     this._pending = new Map();
     this._counter = 0;
     this._idle    = [];
@@ -48,7 +51,7 @@ export class WorkerPool {
 
     // B2: 재귀 재시도에 한도를 두어 Worker 오류 시 무한 루프 방지
     const createWorker = (retries = 3): Worker => {
-      const w = new Worker(workerUrl, { type: 'module' });
+      const w = new WorkerCtor();
       w.onmessage = ({ data }) => this._onResult(data, w);
       w.onerror = (e) => {
         console.error('[WorkerPool] Worker error:', e);

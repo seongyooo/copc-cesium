@@ -8,6 +8,7 @@ import {
 } from './lod.js';
 import { loadNode } from './loader.js';
 import { WorkerPool } from './WorkerPool.js';
+import CopcWorker from './worker.ts?worker&inline';
 import { lookupEpsg } from './epsg-defs.js';
 import type { CopcOptions, ProgressInfo, CrsDetectionResult, NodeCacheEntry, Ref } from '../types.js';
 
@@ -89,7 +90,10 @@ async function detectCrsFromWkt(wkt: string | undefined, url: string): Promise<C
     // WKT2 또는 지원되지 않는 형식 → 2단계로
   }
 
-  const epsgCode = _extractEpsgCode(trimmed);
+  // COMPD_CS(수평+수직 CRS 복합)인 경우 trimmed 전체에서 찾으면 마지막
+  // ID[...]가 수직 CRS(예: NAVD88)의 EPSG 코드일 수 있으므로, 앞서 추출한
+  // 수평 CRS 블록(crsWkt)에서만 찾는다.
+  const epsgCode = _extractEpsgCode(crsWkt);
   if (epsgCode) {
     const proj4Def = lookupEpsg(epsgCode);
     if (proj4Def) {
@@ -166,11 +170,8 @@ export class CopcDataSource {
       proj4.defs(this._opts.proj, this._opts.projDef);
     }
 
-    // Worker 풀
-    this._pool = new WorkerPool(
-      new URL('./worker.js', import.meta.url),
-      this._opts.concurrency,
-    );
+    // Worker 풀 (Blob URL 인라인 워커 — 정적 파일 MIME 타입 이슈 회피)
+    this._pool = new WorkerPool(CopcWorker, this._opts.concurrency);
 
     this._container = new Cesium.PrimitiveCollection({ destroyPrimitives: false });
     viewer.scene.primitives.add(this._container);
@@ -282,6 +283,7 @@ export class CopcDataSource {
 
   // ── 내부 유틸 ───────────────────────────────────────────────
 
+  // key별 원본(오프셋 미적용) BoundingSphere — 영구 캐시
   private _sphere(key: string): Cesium.BoundingSphere {
     let s = this._sphereCache.get(key);
     if (!s) {
@@ -293,7 +295,14 @@ export class CopcDataSource {
       );
       this._sphereCache.set(key, s);
     }
-    return s;
+    // heightOffset은 정점 셰이더에서 렌더링 위치를 u_upVec 방향으로 이동시키므로
+    // (loader.ts), 컬링/SSE 판정에 쓰이는 BoundingSphere도 동일하게 보정해야
+    // 실제 렌더링 위치와 컬링 판정이 어긋나지 않는다.
+    const offset = this._heightOffsetRef.value;
+    if (offset === 0) return s;
+    const shift  = Cesium.Cartesian3.multiplyByScalar(this._upVecRef.value, offset, new Cesium.Cartesian3());
+    const center = Cesium.Cartesian3.add(s.center, shift, new Cesium.Cartesian3());
+    return new Cesium.BoundingSphere(center, s.radius);
   }
 
   // ── 빠른 경로: LoD 선택 결과 내에서 frustum show/hide만 갱신 ──
@@ -508,7 +517,9 @@ export class CopcDataSource {
       this._isUpdating = false;
       if (this._pendingUpdate) {
         this._pendingUpdate = false;
-        void this._updateLoD();
+        void this._updateLoD().catch(err =>
+          console.error('[CopcDataSource] LoD 업데이트 실패:', err)
+        );
       }
     }
   }
@@ -593,7 +604,9 @@ export class CopcDataSource {
 
   set sseThreshold(v: number) {
     this._opts.sseThreshold = v;
-    void this._updateLoD();
+    void this._updateLoD().catch(err =>
+      console.error('[CopcDataSource] LoD 업데이트 실패:', err)
+    );
   }
   get sseThreshold(): number  { return this._opts.sseThreshold; }
 

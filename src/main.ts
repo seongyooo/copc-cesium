@@ -183,34 +183,41 @@ zoomOutBtn.addEventListener('click', () => {
 });
 
 // ── 지형/이미지 ────────────────────────────────────────────
+// 세대(generation) 카운터로 뒤늦게 도착하는 이전 선택의 응답이
+// 이후 선택 결과를 덮어쓰지 않도록 가드한다 (빠른 연속 전환 시 레이스 방지).
+let _terrainGen = 0;
 terrainSelect.addEventListener('change', async () => {
+  const gen = ++_terrainGen;
   // G1: Ion 토큰 만료나 네트워크 오류 시 unhandled rejection 방지
   try {
-    if (terrainSelect.value === 'world') {
-      viewer.terrainProvider = await Cesium.createWorldTerrainAsync();
-    } else {
-      viewer.terrainProvider = new Cesium.EllipsoidTerrainProvider();
-    }
+    const provider = terrainSelect.value === 'world'
+      ? await Cesium.createWorldTerrainAsync()
+      : new Cesium.EllipsoidTerrainProvider();
+    if (gen !== _terrainGen) return; // 이후 선택으로 대체됨
+    viewer.terrainProvider = provider;
   } catch (err) {
+    if (gen !== _terrainGen) return;
     console.error('[main] 지형 로드 실패:', err);
     infoStatus.textContent = `❌ 지형 로드 실패: ${(err as Error).message}`;
   }
 });
 
+let _imageryGen = 0;
 imagerySelect.addEventListener('change', async () => {
+  const gen = ++_imageryGen;
   // G1: Ion 토큰 만료나 네트워크 오류 시 unhandled rejection 방지
   try {
     const v = imagerySelect.value;
+    const provider = v === 'satellite'
+      ? await Cesium.IonImageryProvider.fromAssetId(2)
+      : v === 'osm'
+        ? new Cesium.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' })
+        : null;
+    if (gen !== _imageryGen) return; // 이후 선택으로 대체됨
     viewer.imageryLayers.removeAll();
-    if (v === 'satellite') {
-      const p = await Cesium.IonImageryProvider.fromAssetId(2);
-      viewer.imageryLayers.addImageryProvider(p);
-    } else if (v === 'osm') {
-      viewer.imageryLayers.addImageryProvider(
-        new Cesium.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' }),
-      );
-    }
+    if (provider) viewer.imageryLayers.addImageryProvider(provider);
   } catch (err) {
+    if (gen !== _imageryGen) return;
     console.error('[main] 이미지리 로드 실패:', err);
     infoStatus.textContent = `❌ 이미지리 로드 실패: ${(err as Error).message}`;
   }
@@ -280,7 +287,12 @@ function updateClassMask(): void {
   }
   let mask = 0;
   for (const [cls, on] of Object.entries(_classOn)) {
-    if (on) mask |= (1 << parseInt(cls, 10));
+    const c = parseInt(cls, 10);
+    // 셰이더의 u_classMask는 32비트 정수 하나로 클래스 0-31만 표현 가능.
+    // c >= 32에서 시프트하면 JS 비트 연산이 32로 mod되어(예: 1<<33 === 1<<1)
+    // 엉뚱한 하위 클래스의 비트를 오염시키므로 반드시 걸러낸다.
+    // (classification >= 32는 loader.ts 프래그먼트 셰이더에서 항상 표시됨)
+    if (on && c < 32) mask |= (1 << c);
   }
   currentDs.setClassMask(mask);
 }
