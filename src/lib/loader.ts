@@ -249,6 +249,10 @@ void main() {
 // ── loadNode ─────────────────────────────────────────────────
 /**
  * COPC 노드를 로드하여 PointCloudPrimitive를 반환합니다.
+ *
+ * fetch(HTTP Range) + LAZ 압축 해제 + 속성 추출 + proj4 변환 +
+ * WGS84 Cartesian3 계산까지 전부 워커 안에서 수행되고, 메인 스레드는
+ * 결과 버퍼로 GPU 프리미티브만 조립한다 (worker.ts 참고).
  */
 export async function loadNode(
   url: string,
@@ -264,100 +268,18 @@ export async function loadNode(
   upVecRef: Ref<Cesium.Cartesian3> | null = null,
   heightOffsetRef: Ref<number> | null = null,
 ): Promise<NodeCacheEntry> {
-  // ── 1. fetch + LAZ 파싱 ───────────────────────────────────
-  const view = await Copc.loadPointDataView(url, copc, nodeInfo);
-  const n    = view.pointCount;
-
-  const getX = view.getter('X');
-  const getY = view.getter('Y');
-  const getZ = view.getter('Z');
-
-  let getR: ((i: number) => number) | undefined;
-  let getG: ((i: number) => number) | undefined;
-  let getB: ((i: number) => number) | undefined;
-  try { getR = view.getter('Red');   } catch { /* RGB 없음 */ }
-  try { getG = view.getter('Green'); } catch { /* RGB 없음 */ }
-  try { getB = view.getter('Blue');  } catch { /* RGB 없음 */ }
-  const hasRGB = !!(getR && getG && getB);
-
-  let getI: ((i: number) => number) | undefined;
-  if (!hasRGB) {
-    try { getI = view.getter('Intensity'); } catch { /* Intensity도 없음 */ }
-  }
-
-  let getCls: ((i: number) => number) | undefined;
-  try { getCls = view.getter('Classification'); } catch { /* Classification 없음 */ }
-
-  const xs   = new Float64Array(n);
-  const ys   = new Float64Array(n);
-  const zs   = new Float64Array(n);
-  const rs   = new Float32Array(n);
-  const gs   = new Float32Array(n);
-  const bs   = new Float32Array(n);
-  const clsU8       = new Uint8Array(n);
-  const seenClasses = new Set<number>();
-
-  for (let i = 0; i < n; i++) {
-    xs[i] = getX(i); ys[i] = getY(i); zs[i] = getZ(i);
-    if (hasRGB && getR && getG && getB) {
-      rs[i] = getR(i); gs[i] = getG(i); bs[i] = getB(i);
-    } else if (getI) {
-      rs[i] = gs[i] = bs[i] = getI(i);
-    } else {
-      rs[i] = gs[i] = bs[i] = 65535;
-    }
-    const c  = getCls ? (getCls(i) & 0xFF) : 0;
-    clsU8[i] = c;
-    seenClasses.add(c);
-  }
-
-  // ── 2. Worker: proj4 변환 + WGS84 Cartesian3 계산 ────────
-  const { positions, colors, pointCount } = await pool.run(
-    { xs, ys, zs, rs, gs, bs, pointCount: n, srcProj, projDef, geoidOffset, zFactor, hasRGB },
-    [xs.buffer, ys.buffer, zs.buffer, rs.buffer, gs.buffer, bs.buffer],
+  const { posHigh, posLow, colors, cls, pointCount, sphereCenter, sphereRadius, seenClasses } = await pool.run(
+    { url, copc, nodeInfo, srcProj, projDef, geoidOffset, zFactor },
   );
 
-  // ── 3. 색상 배열 (Worker가 이미 Uint8Array로 반환) ────────
-  const colU8 = colors; // Uint8Array (n×4)
-
-  // ── 4. ECEF Float64 → Float32 high/low 분리 (RTE) ────────
-  const posHigh = new Float32Array(pointCount * 3);
-  const posLow  = new Float32Array(pointCount * 3);
-  for (let i = 0; i < pointCount * 3; i++) {
-    const v    = positions[i];
-    const hi   = Math.fround(v);
-    posHigh[i] = hi;
-    posLow[i]  = v - hi;
-  }
-
-  // ── 5. BoundingSphere (ECEF, Float64 평균/최대거리) ──────
-  let sumX = 0, sumY = 0, sumZ = 0;
-  for (let i = 0; i < pointCount; i++) {
-    sumX += positions[i * 3];
-    sumY += positions[i * 3 + 1];
-    sumZ += positions[i * 3 + 2];
-  }
-  const cx = sumX / pointCount;
-  const cy = sumY / pointCount;
-  const cz = sumZ / pointCount;
-
-  let rSq = 0;
-  for (let i = 0; i < pointCount; i++) {
-    const dx = positions[i * 3]     - cx;
-    const dy = positions[i * 3 + 1] - cy;
-    const dz = positions[i * 3 + 2] - cz;
-    const d  = dx * dx + dy * dy + dz * dz;
-    if (d > rSq) rSq = d;
-  }
   const boundingSphere = new Cesium.BoundingSphere(
-    new Cesium.Cartesian3(cx, cy, cz),
-    Math.sqrt(rSq),
+    new Cesium.Cartesian3(sphereCenter[0], sphereCenter[1], sphereCenter[2]),
+    sphereRadius,
   );
 
-  // ── 6. PointCloudPrimitive 생성 ──────────────────────────
   const primitive = new PointCloudPrimitive(
-    posHigh, posLow, colU8, clsU8, pointCount, boundingSphere, pixelSizeRef, classMaskRef, upVecRef, heightOffsetRef,
+    posHigh, posLow, colors, cls, pointCount, boundingSphere, pixelSizeRef, classMaskRef, upVecRef, heightOffsetRef,
   );
 
-  return { collection: primitive, pointCount, lastUsed: Date.now(), seenClasses };
+  return { collection: primitive, pointCount, lastUsed: Date.now(), seenClasses: new Set(seenClasses) };
 }

@@ -8,7 +8,10 @@ import {
 } from './lod.js';
 import { loadNode } from './loader.js';
 import { WorkerPool } from './WorkerPool.js';
-import CopcWorker from './worker.ts?worker&inline';
+// laz-perf(워커 빌드)는 self.location.href가 blob: URL이면 scriptDirectory를
+// 빈 문자열로 처리해 상대경로 wasm fetch가 깨진다 (`?worker&inline` 사용 시
+// 재현됨). 실제 URL을 갖는 별도 청크로 분리해야 한다.
+import CopcWorker from './worker.ts?worker';
 import { lookupEpsg } from './epsg-defs.js';
 import type { CopcOptions, ProgressInfo, CrsDetectionResult, NodeCacheEntry, Ref } from '../types.js';
 
@@ -183,6 +186,9 @@ export class CopcDataSource {
   private _upVecRef:        Ref<Cesium.Cartesian3>;
   private _heightOffsetRef: Ref<number>;
   private _onProgress: ((info: ProgressInfo) => void) | null;
+  private _pendingEmit: Omit<ProgressInfo, 'seenClasses'> | null;
+  private _emitTimer:   ReturnType<typeof setTimeout> | null;
+  private _lastEmitMs:  number;
   private _destroyed: boolean;
   private _lastSphereMap: Map<string, Cesium.BoundingSphere> | null;
   private _removePostUpdateListener: (() => void) | null;
@@ -242,6 +248,9 @@ export class CopcDataSource {
     this._heightOffsetRef = { value: 0 };
 
     this._onProgress              = null;
+    this._pendingEmit             = null;
+    this._emitTimer               = null;
+    this._lastEmitMs              = 0;
     this._destroyed               = false;
     this._lastSphereMap           = null;
     this._removePostUpdateListener = null;
@@ -371,14 +380,22 @@ export class CopcDataSource {
   private _updateVisibility(): void {
     if (this._lastTargetSet.size === 0) return;
     const cv = getCullingVolume(this._viewer.camera);
+    let changed = false;
     for (const key of this._lastTargetSet) {
       const data = this._cache.get(key);
       if (data) {
         const sphere = (this._lastSphereMap && this._lastSphereMap.get(key))
           ?? this._sphere(key);
-        data.collection.show = isInFrustum(sphere, cv);
+        const show = isInFrustum(sphere, cv);
+        if (data.collection.show !== show) {
+          data.collection.show = show;
+          changed = true;
+        }
       }
     }
+    // requestRenderMode: show 값은 이번 프레임의 커맨드 수집 이후(postUpdate)에
+    // 바뀌므로, 바뀐 결과를 실제로 그려낼 다음 프레임을 명시적으로 요청해야 한다.
+    if (changed) this._viewer.scene.requestRender();
   }
 
   // ── BFS LoD 선택 ────────────────────────────────────────────
@@ -482,12 +499,14 @@ export class CopcDataSource {
       };
 
       const toLoad: string[] = [];
+      let sceneChanged = false;
       for (const key of visibleKeys) {
         if (this._cache.has(key)) {
           const d = this._cache.get(key)!;
           if (!this._inScene.has(key)) {
             this._container.add(d.collection);
             this._inScene.add(key);
+            sceneChanged = true;
           }
           d.collection.show = true;
           d.lastUsed = Date.now();
@@ -495,6 +514,8 @@ export class CopcDataSource {
           toLoad.push(key);
         }
       }
+      // requestRenderMode: 캐시에서 즉시 재사용된 노드가 있으면 바로 반영
+      if (sceneChanged) this._viewer.scene.requestRender();
 
       this._emit({ depth: maxDepth, visible: visibleKeys.length, culled,
         loading: toLoad.length, cached: this._cache.size, height });
@@ -535,6 +556,9 @@ export class CopcDataSource {
         this._inScene.add(key);
         this._cache.set(key, data);
         loadedCount++;
+        // requestRenderMode: 노드가 스트리밍되며 하나씩 로드되므로, 완료될
+        // 때마다 즉시 다음 프레임을 요청해야 점진적으로 화면에 나타난다.
+        this._viewer.scene.requestRender();
         this._emit({ depth: maxDepth, visible: visibleKeys.length, culled,
           loading: toLoad.length - loadedCount, cached: this._cache.size, height });
       };
@@ -550,10 +574,12 @@ export class CopcDataSource {
       if (priorityPromise) await priorityPromise;
 
       if (gen === this._loadGen && !this._destroyed) {
+        let sceneChanged2 = false;
         for (const [key, data] of this._cache) {
           if (!targetSet.has(key) && this._inScene.has(key)) {
             this._container.remove(data.collection);
             this._inScene.delete(key);
+            sceneChanged2 = true;
           }
         }
 
@@ -562,8 +588,16 @@ export class CopcDataSource {
         const cv2 = getCullingVolume(camera);
         for (const key of targetSet) {
           const data = this._cache.get(key);
-          if (data) data.collection.show = isInFrustum(getSphere(key), cv2);
+          if (data) {
+            const show = isInFrustum(getSphere(key), cv2);
+            if (data.collection.show !== show) {
+              data.collection.show = show;
+              sceneChanged2 = true;
+            }
+          }
         }
+        // requestRenderMode: 제거/가시성 변경이 있었다면 다음 프레임에 반영
+        if (sceneChanged2) this._viewer.scene.requestRender();
 
         const visiblePoints = [...targetSet]
           .reduce((s, k) => s + (this._cache.get(k)?.pointCount ?? 0), 0);
@@ -648,8 +682,35 @@ export class CopcDataSource {
     });
   }
 
+  // 노드 스트리밍 중에는 완료될 때마다 호출되어 짧은 시간에 수십 번 몰릴 수
+  // 있으므로, 최소 EMIT_INTERVAL_MS 간격으로만 실제 콜백을 발생시키고 그
+  // 사이의 정보는 최신 값으로 덮어써서 보낸다 (leading + trailing throttle —
+  // 값을 잃어버리지 않으면서 UI 갱신 빈도를 제한).
+  private static readonly EMIT_INTERVAL_MS = 100;
+
   private _emit(info: Omit<ProgressInfo, 'seenClasses'>): void {
-    if (this._onProgress) this._onProgress({ ...info, seenClasses: this._seenClasses });
+    if (!this._onProgress) return;
+    this._pendingEmit = info;
+
+    const elapsed = Date.now() - this._lastEmitMs;
+    if (elapsed >= CopcDataSource.EMIT_INTERVAL_MS && !this._emitTimer) {
+      this._flushEmit();
+      return;
+    }
+    if (!this._emitTimer) {
+      const delay = Math.max(0, CopcDataSource.EMIT_INTERVAL_MS - elapsed);
+      this._emitTimer = setTimeout(() => this._flushEmit(), delay);
+    }
+  }
+
+  private _flushEmit(): void {
+    if (this._emitTimer) { clearTimeout(this._emitTimer); this._emitTimer = null; }
+    this._lastEmitMs = Date.now();
+    const pending = this._pendingEmit;
+    this._pendingEmit = null;
+    if (pending && this._onProgress) {
+      this._onProgress({ ...pending, seenClasses: this._seenClasses });
+    }
   }
 
   // ── 공개 API ────────────────────────────────────────────────
@@ -657,21 +718,34 @@ export class CopcDataSource {
   set onProgress(fn: ((info: ProgressInfo) => void) | null) { this._onProgress = fn; }
   get onProgress(): ((info: ProgressInfo) => void) | null   { return this._onProgress; }
 
-  set pixelSize(v: number)   { this._pixelSizeRef.value = v; }
+  // requestRenderMode: 셰이더 uniform(ref)만 바뀌는 값들은 프레임이 이미
+  // 진행 중이 아니면 화면에 반영되지 않으므로, 매 setter마다 명시적으로
+  // 다음 프레임을 요청한다.
+  set pixelSize(v: number) {
+    this._pixelSizeRef.value = v;
+    this._viewer.scene.requestRender();
+  }
   get pixelSize(): number    { return this._pixelSizeRef.value; }
 
-  set heightOffset(v: number) { this._heightOffsetRef.value = v; }
+  set heightOffset(v: number) {
+    this._heightOffsetRef.value = v;
+    this._viewer.scene.requestRender();
+  }
   get heightOffset(): number  { return this._heightOffsetRef.value; }
 
   set sseThreshold(v: number) {
     this._opts.sseThreshold = v;
+    this._viewer.scene.requestRender();
     void this._updateLoD().catch(err =>
       console.error('[CopcDataSource] LoD 업데이트 실패:', err)
     );
   }
   get sseThreshold(): number  { return this._opts.sseThreshold; }
 
-  setClassMask(mask: number): void { this._classMaskRef.value = mask; }
+  setClassMask(mask: number): void {
+    this._classMaskRef.value = mask;
+    this._viewer.scene.requestRender();
+  }
 
   get seenClasses(): Set<number>  { return this._seenClasses; }
   get maxDepth(): number          { return this._maxDepth; }
@@ -683,6 +757,8 @@ export class CopcDataSource {
     this._destroyed = true;
     if (this._removePostUpdateListener) this._removePostUpdateListener();
     if (this._removeMoveEndListener)    this._removeMoveEndListener();
+    if (this._emitTimer) { clearTimeout(this._emitTimer); this._emitTimer = null; }
+    this._pendingEmit = null;
     this._pool.destroy();
     for (const data of this._cache.values()) {
       data.collection.destroy();

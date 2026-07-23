@@ -6,9 +6,14 @@
  */
 
 export type WorkerResult = {
-  positions: Float64Array;
+  posHigh: Float32Array;
+  posLow: Float32Array;
   colors: Uint8Array;
+  cls: Uint8Array;
   pointCount: number;
+  sphereCenter: [number, number, number];
+  sphereRadius: number;
+  seenClasses: number[];
 };
 
 interface WorkerResponse extends Partial<WorkerResult> {

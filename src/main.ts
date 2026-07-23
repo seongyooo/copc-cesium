@@ -16,6 +16,13 @@ const viewer = new Cesium.Viewer('cesiumContainer', {
   navigationHelpButton: false,
   fullscreenButton:     false,
   terrain: Cesium.Terrain.fromWorldTerrain(),
+  // 애니메이션 엔티티가 없는 정적 포인트클라우드 뷰어이므로, 아무 변화가
+  // 없을 때 매 프레임 다시 그리지 않도록 명시적 렌더링 모드로 전환한다.
+  // 카메라 이동/지형·이미지리 타일 로드는 Cesium이 자동으로 재렌더를
+  // 요청하지만, CopcDataSource가 씬을 직접 건드리는 지점(노드 추가/제거,
+  // pixelSize·classMask·heightOffset 변경 등)은 명시적으로
+  // scene.requestRender()를 호출해야 한다 (CopcDataSource.ts 참고).
+  requestRenderMode: true,
 });
 
 // Cesium 크레딧 컨테이너를 우리 UI와 겹치지 않게 처리
@@ -195,6 +202,7 @@ terrainSelect.addEventListener('change', async () => {
       : new Cesium.EllipsoidTerrainProvider();
     if (gen !== _terrainGen) return; // 이후 선택으로 대체됨
     viewer.terrainProvider = provider;
+    viewer.scene.requestRender(); // requestRenderMode: 지형 교체 즉시 반영
   } catch (err) {
     if (gen !== _terrainGen) return;
     console.error('[main] 지형 로드 실패:', err);
@@ -216,6 +224,7 @@ imagerySelect.addEventListener('change', async () => {
     if (gen !== _imageryGen) return; // 이후 선택으로 대체됨
     viewer.imageryLayers.removeAll();
     if (provider) viewer.imageryLayers.addImageryProvider(provider);
+    viewer.scene.requestRender(); // requestRenderMode: 이미지리 교체 즉시 반영
   } catch (err) {
     if (gen !== _imageryGen) return;
     console.error('[main] 이미지리 로드 실패:', err);

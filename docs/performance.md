@@ -122,34 +122,28 @@ private _flush(): void {
 
 ## 🏗️ 더 큰 구조적 레버 (참고용 — 이번 패스 범위 밖)
 
-### 6. 포인트 속성 추출 루프가 메인 스레드에서 실행됨
+### 6. ~~포인트 속성 추출 루프가 메인 스레드에서 실행됨~~ — ✅ 해결됨 (2026-07-23)
 
-**위치:** `src/lib/loader.ts:300-312`
+`Copc.loadPointDataView()`(fetch + LAZ 압축 해제) 호출 자체를 `worker.ts`로 옮겨서,
+속성 추출부터 좌표 변환까지 전부 워커 안에서 수행하도록 재구성했다. 메인 스레드는
+결과 버퍼(posHigh/posLow/colors/cls)로 GPU 프리미티브만 조립한다.
 
-```ts
-for (let i = 0; i < n; i++) {
-  xs[i] = getX(i); ys[i] = getY(i); zs[i] = getZ(i);
-  if (hasRGB && getR && getG && getB) {
-    rs[i] = getR(i); gs[i] = getG(i); bs[i] = getB(i);
-  } else if (getI) {
-    rs[i] = gs[i] = bs[i] = getI(i);
-  } else {
-    rs[i] = gs[i] = bs[i] = 65535;
-  }
-  const c = getCls ? (getCls(i) & 0xFF) : 0;
-  ...
-}
-```
+핵심은 `laz-perf`(copc.js가 내부적으로 쓰는 wasm 모듈)가 web/node/worker용 빌드를
+각각 배포한다는 점 — 실제 wasm 바이너리는 동일하고 JS 글루 코드의
+`ENVIRONMENT_IS_WORKER` 플래그만 다르다. `vite.config.js`에 worker 전용
+`resolveId` 플러그인을 추가해 워커 번들링 시에만 `laz-perf` → `laz-perf/lib/worker/index.js`로
+바꿔치기했다. 우회 과정에서 두 가지를 추가로 발견/수정:
 
-X/Y/Z/RGB/Classification까지 포인트당 최대 7번의 getter 호출이 워커로
-넘기기 *전에* 메인 스레드에서 동기 실행됩니다. 현재 워커(`worker.ts`)는
-proj4 좌표 변환 부분만 맡고 있어서, 노드가 크거나 동시 로드가 많을 때
-(기본 `concurrency: 5`) 이 루프가 실제 프레임 드랍(버벅임)의 원인일
-가능성이 가장 높습니다.
+- Blob URL 워커(`?worker&inline`)에서는 laz-perf 글루 코드가 `self.location.href`의
+  `blob:` 프리픽스를 보고 `scriptDirectory`를 빈 문자열로 처리해 `fetch("laz-perf.wasm")`이
+  실패한다(`Failed to parse URL`) — `?worker`(실제 URL을 갖는 별도 청크)로 전환해 해결.
+- wasm 자산을 워커 청크와 다른 디렉터리에 두면, 글루 코드의 스크립트-상대경로 요청이
+  404 → SPA 폴백(`index.html`)을 받아 `WebAssembly.instantiate(): expected magic word`
+  에러가 난다 — wasm을 워커 청크와 같은 `dist/assets/`에 배치해 해결.
 
-**개선안:** LAZ 디코딩(`Copc.loadPointDataView` 호출 자체)을 워커로 옮기면
-메인 스레드 부담을 크게 줄일 수 있지만, 아키텍처 변경이 커서 별도 스프린트
-필요.
+자세한 배경은 README.md §8 "laz-perf.wasm — Worker에서 사용 가능"과 `vite.config.js`
+주석 참고. 브라우저 실측(Autzen 10.7M, New Zealand 44.2M 데이터셋, 분류 필터·스트리밍
+동작 포함)으로 검증 완료, `npm run dev`/`vite preview` 양쪽 확인.
 
 ---
 
@@ -186,8 +180,12 @@ LRU 캐시/eviction 모델을 다시 설계해야 해서 리스크가 큼.
 - [x] 1. BFS 우선순위 큐 → 이진 힙 (2026-07-23, `CopcDataSource.ts`의 `MaxHeap` 클래스)
 - [x] 2. `_sphere()` heightOffset 보정 캐싱 (2026-07-23, `_shiftedSphereCache`)
 - [x] 3. `WorkerPool` 큐 O(n) shift 제거 (2026-07-23, `_queueHead` 커서 방식)
-- [ ] 4. `requestRenderMode` 전환
-- [ ] 5. progress emit 코일레싱
-- [ ] 6. 포인트 속성 추출 워커 이전 (구조 변경)
+- [x] 4. `requestRenderMode` 전환 (2026-07-23, `main.ts` Viewer 옵션 + `CopcDataSource`
+      노드 add/remove/show, pixelSize/heightOffset/sseThreshold/classMask 변경 시
+      `scene.requestRender()` 명시 호출)
+- [x] 5. progress emit 코일레싱 (2026-07-23, `_emit`/`_flushEmit` leading+trailing
+      throttle, 100ms 간격, 최종 상태는 항상 보존)
+- [x] 6. 포인트 속성 추출(+ fetch/LAZ 디코딩) 워커 이전 (2026-07-23, `worker.ts` 전체
+      재구성 + `vite.config.js` laz-perf worker alias, 상세 내용은 위 6번 항목 참고)
 - [ ] 7. draw call 병합 (구조 변경)
 - [ ] 8. 노드 키 정수 패킹 (구조 변경)
