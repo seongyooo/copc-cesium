@@ -111,6 +111,51 @@ async function detectCrsFromWkt(wkt: string | undefined, url: string): Promise<C
 type InternalCopcOptions = Omit<Required<CopcOptions>, 'xyFactor'> & { xyFactor?: number };
 
 /**
+ * 최대 힙(SSE 내림차순). `_selectNodesBFS`의 우선순위 큐용.
+ * 배열 push+sort(O(n log n)) / shift(O(n)) 대신 O(log n) 삽입·추출을 제공한다.
+ */
+class MaxHeap<T> {
+  private _data: T[] = [];
+  constructor(private _score: (item: T) => number) {}
+
+  get size(): number { return this._data.length; }
+
+  push(item: T): void {
+    const d = this._data;
+    d.push(item);
+    let i = d.length - 1;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (this._score(d[parent]) >= this._score(d[i])) break;
+      [d[parent], d[i]] = [d[i], d[parent]];
+      i = parent;
+    }
+  }
+
+  pop(): T | undefined {
+    const d = this._data;
+    if (d.length === 0) return undefined;
+    const top  = d[0];
+    const last = d.pop()!;
+    if (d.length > 0) {
+      d[0] = last;
+      let i = 0;
+      const n = d.length;
+      for (;;) {
+        const l = 2 * i + 1, r = 2 * i + 2;
+        let largest = i;
+        if (l < n && this._score(d[l]) > this._score(d[largest])) largest = l;
+        if (r < n && this._score(d[r]) > this._score(d[largest])) largest = r;
+        if (largest === i) break;
+        [d[i], d[largest]] = [d[largest], d[i]];
+        i = largest;
+      }
+    }
+    return top;
+  }
+}
+
+/**
  * CopcDataSource
  *
  * COPC(.copc.laz) 파일을 CesiumJS Viewer에 스트리밍 방식으로 가시화하는 클래스.
@@ -122,6 +167,8 @@ export class CopcDataSource {
   private _pool:     WorkerPool;
   private _container: Cesium.PrimitiveCollection;
   private _sphereCache: Map<string, Cesium.BoundingSphere>;
+  private _shiftedSphereCache: Map<string, Cesium.BoundingSphere>;
+  private _shiftedSphereOffset: number;
   private _scratchA: Cesium.Cartesian3;
   private _scratchB: Cesium.Cartesian3;
   private _cache:    Map<string, NodeCacheEntry>;
@@ -177,6 +224,8 @@ export class CopcDataSource {
     viewer.scene.primitives.add(this._container);
 
     this._sphereCache  = new Map();
+    this._shiftedSphereCache  = new Map();
+    this._shiftedSphereOffset = 0;
     this._scratchA     = new Cesium.Cartesian3();
     this._scratchB     = new Cesium.Cartesian3();
     this._cache        = new Map();
@@ -300,9 +349,21 @@ export class CopcDataSource {
     // 실제 렌더링 위치와 컬링 판정이 어긋나지 않는다.
     const offset = this._heightOffsetRef.value;
     if (offset === 0) return s;
-    const shift  = Cesium.Cartesian3.multiplyByScalar(this._upVecRef.value, offset, new Cesium.Cartesian3());
-    const center = Cesium.Cartesian3.add(s.center, shift, new Cesium.Cartesian3());
-    return new Cesium.BoundingSphere(center, s.radius);
+
+    // offset이 바뀌지 않는 한 key별 보정 결과를 재사용 — BFS 순회 중 노드당
+    // 여러 번 호출되므로 매번 새 Cartesian3/BoundingSphere를 할당하지 않는다.
+    if (offset !== this._shiftedSphereOffset) {
+      this._shiftedSphereCache.clear();
+      this._shiftedSphereOffset = offset;
+    }
+    let shifted = this._shiftedSphereCache.get(key);
+    if (!shifted) {
+      const shift  = Cesium.Cartesian3.multiplyByScalar(this._upVecRef.value, offset, new Cesium.Cartesian3());
+      const center = Cesium.Cartesian3.add(s.center, shift, new Cesium.Cartesian3());
+      shifted = new Cesium.BoundingSphere(center, s.radius);
+      this._shiftedSphereCache.set(key, shifted);
+    }
+    return shifted;
   }
 
   // ── 빠른 경로: LoD 선택 결과 내에서 frustum show/hide만 갱신 ──
@@ -340,14 +401,16 @@ export class CopcDataSource {
     let   culled      = 0;
     let   maxDepth    = 0;
 
-    // SSE 내림차순 우선순위 큐: 카메라 기준 가장 중요한 노드부터 확장
-    // FIFO 큐와 달리 멀리 있는 노드보다 가까운 고-SSE 노드를 우선 처리
+    // SSE 내림차순 우선순위 큐(이진 힙): 카메라 기준 가장 중요한 노드부터 확장.
+    // FIFO 큐와 달리 멀리 있는 노드보다 가까운 고-SSE 노드를 우선 처리.
+    // 배열 push+sort 방식(O(n log n)/확장) 대신 힙 삽입·추출(O(log n))을 사용.
     const rootSphere = getSphere('0-0-0-0');
     const rootSse    = screenSpaceError(rootSphere, camera, scene);
-    const pq: Array<{ key: string; sse: number }> = [{ key: '0-0-0-0', sse: rootSse }];
+    const heap = new MaxHeap<{ key: string; sse: number }>(e => e.sse);
+    heap.push({ key: '0-0-0-0', sse: rootSse });
 
-    while (pq.length > 0) {
-      const { key } = pq.shift()!;
+    while (heap.size > 0) {
+      const { key } = heap.pop()!;
 
       const nodeInfo = this._nodes[key];
       if (!nodeInfo) continue;
@@ -359,9 +422,8 @@ export class CopcDataSource {
       if (nodeInfo.pointCount === 0) {
         const children = getChildKeys(key).filter(k => this._nodes[k]);
         for (const k of children) {
-          pq.push({ key: k, sse: screenSpaceError(getSphere(k), camera, scene) });
+          heap.push({ key: k, sse: screenSpaceError(getSphere(k), camera, scene) });
         }
-        pq.sort((a, b) => b.sse - a.sse);
         continue;
       }
 
@@ -370,9 +432,8 @@ export class CopcDataSource {
 
       if (visibleKeys.length < maxNodes && sse > threshold && children.length > 0) {
         for (const k of children) {
-          pq.push({ key: k, sse: screenSpaceError(getSphere(k), camera, scene) });
+          heap.push({ key: k, sse: screenSpaceError(getSphere(k), camera, scene) });
         }
-        pq.sort((a, b) => b.sse - a.sse);
       } else {
         visibleKeys.push(key);
         const d = getDepth(key);

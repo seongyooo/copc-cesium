@@ -37,6 +37,8 @@ export class WorkerPool {
   private _counter: number;
   private _idle: Worker[];
   private _queue: QueueEntry[];
+  // shift() 대신 커서로 dequeue (O(n) → O(1)). _queue[0.._queueHead)는 이미 소비됨.
+  private _queueHead: number;
 
   /**
    * @param WorkerCtor Vite `?worker&inline` 생성자 (Blob URL 기반이므로
@@ -44,10 +46,11 @@ export class WorkerPool {
    * @param size       풀 크기 (동시 실행 Worker 수)
    */
   constructor(WorkerCtor: WorkerCtor, size: number) {
-    this._pending = new Map();
-    this._counter = 0;
-    this._idle    = [];
-    this._queue   = [];
+    this._pending   = new Map();
+    this._counter   = 0;
+    this._idle      = [];
+    this._queue     = [];
+    this._queueHead = 0;
 
     // B2: 재귀 재시도에 한도를 두어 Worker 오류 시 무한 루프 방지
     const createWorker = (retries = 3): Worker => {
@@ -115,9 +118,10 @@ export class WorkerPool {
           // pending에서 제거. 워커가 뒤늦게 응답하면 _onResult에서 idle 복귀됨
           this._pending.delete(id);
         } else {
-          // 아직 큐에서 대기 중이면 제거
-          const qi = this._queue.findIndex(q => q.id === id);
-          if (qi !== -1) this._queue.splice(qi, 1);
+          // 아직 큐에서 대기 중이면 제거 (미소비 구간 [_queueHead, length)에서만 탐색)
+          for (let i = this._queueHead; i < this._queue.length; i++) {
+            if (this._queue[i].id === id) { this._queue.splice(i, 1); break; }
+          }
         }
         settle(reject, new Error(`Worker 응답 타임아웃 (${timeoutMs}ms)`));
       }, timeoutMs);
@@ -128,11 +132,13 @@ export class WorkerPool {
   destroy(): void {
     this._idle.forEach(w => w.terminate());
     this._idle = [];
-    // 대기 중인 작업 reject (A-4: 이전에는 _queue만 처리, _pending 누락)
-    for (const { reject } of this._queue) {
-      reject(new Error('WorkerPool destroyed'));
+    // 대기 중인(아직 디스패치되지 않은) 작업만 reject — 미소비 구간만 순회
+    // (A-4: 이전에는 _queue만 처리, _pending 누락)
+    for (let i = this._queueHead; i < this._queue.length; i++) {
+      this._queue[i].reject(new Error('WorkerPool destroyed'));
     }
-    this._queue = [];
+    this._queue     = [];
+    this._queueHead = 0;
     // Worker에 이미 디스패치된 pending 작업도 reject
     for (const { reject } of this._pending.values()) {
       reject(new Error('WorkerPool destroyed'));
@@ -141,11 +147,20 @@ export class WorkerPool {
   }
 
   private _flush(): void {
-    while (this._idle.length > 0 && this._queue.length > 0) {
+    while (this._idle.length > 0 && this._queueHead < this._queue.length) {
       const worker = this._idle.pop()!;
-      const { id, msg, transfer, resolve, reject } = this._queue.shift()!;
+      const { id, msg, transfer, resolve, reject } = this._queue[this._queueHead++];
       this._pending.set(id, { resolve, reject, worker });
       worker.postMessage(msg, transfer);
+    }
+    // 큐가 완전히 소진되면 배열을 비워 메모리를 회수, 아니면 소비된 앞부분이
+    // 과도하게 쌓였을 때만 압축(잦은 압축으로 인한 재할당 비용은 피함)
+    if (this._queueHead === this._queue.length) {
+      this._queue     = [];
+      this._queueHead = 0;
+    } else if (this._queueHead > 64 && this._queueHead * 2 > this._queue.length) {
+      this._queue     = this._queue.slice(this._queueHead);
+      this._queueHead = 0;
     }
   }
 
